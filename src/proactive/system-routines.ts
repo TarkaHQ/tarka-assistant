@@ -24,7 +24,8 @@ export async function syncSystemRoutines(user: User): Promise<void> {
   } else {
     const cron = cronAt(briefTime);
     const next = nextCronRun(cron, tz);
-    if (brief) await routines.update(user.id, brief.id, { cron, timezone: tz, nextRunAt: next, status: 'active' });
+    // A brief the user paused stays paused; only its time and zone follow the settings.
+    if (brief) await routines.update(user.id, brief.id, { cron, timezone: tz, nextRunAt: next, status: brief.status === 'paused' ? 'paused' : 'active' });
     else
       await routines.create(user.id, {
         kind: 'brief', title: 'Morning brief', scheduleType: 'cron', cron, timezone: tz, nextRunAt: next, createdBy: 'system',
@@ -39,7 +40,7 @@ export async function syncSystemRoutines(user: User): Promise<void> {
   } else {
     const cron = proactivity === 'high' ? '15 10,13,16,19 * * *' : '30 12,17 * * 1-5';
     const next = nextCronRun(cron, tz);
-    if (checkin) await routines.update(user.id, checkin.id, { cron, timezone: tz, nextRunAt: next, status: 'active' });
+    if (checkin) await routines.update(user.id, checkin.id, { cron, timezone: tz, nextRunAt: next, status: checkin.status === 'paused' ? 'paused' : 'active' });
     else
       await routines.create(user.id, {
         kind: 'checkin', title: 'Check-in', scheduleType: 'cron', cron, timezone: tz, nextRunAt: next, createdBy: 'system',

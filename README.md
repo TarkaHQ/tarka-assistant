@@ -13,7 +13,7 @@ It is built as the example a non-technical person can try in a minute (sign up, 
 | **Reminds and follows up** | Reminders (one-off or repeating), scheduled tasks it runs itself ("every Monday at 8, send me my week"), a morning brief, check-ins, and meeting heads-ups. Quiet hours and a daily cap. |
 | **Works through your accounts** | Google Calendar (list, free slots, create, move, delete), Gmail (search, read, draft, send), Drive (search, read Docs/Sheets/Slides) and Contacts. |
 | **Acts in the world** | Web search and reading, weather, lists, exact calculations in a Tarka sandbox, and concierge phone calls to businesses with a report back. |
-| **Asks first** | Anything that sends, invites, deletes or calls is held as an approval. Only a short yes/no from the person's own channel, or a dashboard button, executes it. The model can't approve its own actions. |
+| **Asks first** | Anything that sends, invites, deletes or calls, and any repeating task, is held as an approval. The person sees a summary written by code (not the model) and only a plain YES, a button, or "yes CODE" executes it. The model can't approve its own actions. |
 | **Shows its work** | Each reply records model, tokens, cost, memory recall and tools. The "Under the hood" page shows this and lets people switch models. |
 
 ## How a message flows
@@ -22,7 +22,7 @@ It is built as the example a non-technical person can try in a minute (sign up, 
  Telegram / SMS / WhatsApp / web / phone
             │ webhook or poll
             ▼
-   inbound queue (pg-boss, FIFO per person)
+   inbound queue (pg-boss, one message at a time per person)
             │
             ▼
  identity → sign-up/onboarding → approval reply? ──yes/no──► execute held action
@@ -79,13 +79,18 @@ WhatsApp: since 15 January 2026 Meta bars general-purpose AI assistants from the
 
 ## Safety model
 
-* **Approval gate:** tools declare when they need approval (`approval()` in `src/agent/tools/*`). Held actions execute only on a deterministic yes/no from the user's own channel (`src/agent/approvals.ts`), never on the model's say-so. A second "yes" can't run an action twice.
+* **Approval gate:** tools declare when they need approval (`approval()` in `src/agent/tools/*`): sending email, invitations, deletions, calls, and repeating tasks. A held action runs only on a deterministic decision (`src/agent/approvals.ts`), never on the model's say-so:
+  * the whole reply must be a yes or a no ("yes", "ok send it", "👍"); "yes, but…", "yes I'm free Tuesday" or "yes?" are conversation;
+  * a bare yes counts only for the request(s) in the assistant's newest message; anything older needs its code ("yes K7PD"), the buttons, or the dashboard;
+  * under the model's reply, the person sees the request as written by code (recipients, full email text, schedule), so a model that misdescribes an action can't get it approved.
 * **Untrusted content:** web pages, emails and documents are marked as data in tool results and in the instructions.
-* **Outbound fetches** from `web_read` refuse private, loopback, link-local and metadata addresses, re-checked on each redirect.
+* **Outbound fetches** from `web_read` only reach public addresses: private, loopback, link-local, metadata and IPv4-in-IPv6 forms are refused, the socket is pinned to the checked addresses (no DNS rebinding), and every redirect is checked again. The Hindsight API needs a key (`HINDSIGHT_API_KEY`).
 * **Secrets:** OAuth tokens are encrypted with AES-256-GCM keyed from `APP_SECRET`; card numbers, one-time codes and passwords are redacted before anything reaches memory.
-* **Webhooks** are verified: Telnyx (Ed25519), Telegram (secret token), Stripe (signature).
-* **Voice caller ID can be spoofed.** Phone calls can't approve actions, and the inbound phone agent gets no email or Drive tools.
-* **Deletion:** "Forget everything" deletes the memory bank; deleting the account removes all rows (cascade) and the bank.
+* **Webhooks** are verified: Telnyx (Ed25519), Telegram (secret token, derived from `APP_SECRET` when not set), Stripe (signature). Redelivered webhooks are queued once.
+* **Sign-in links** open a confirmation page that names the account; only its button uses the link (link previews can't), and it only continues to this site's own pages. Connecting Google is tied to the browser session that started it, so a forwarded link can't attach one person's Google account to another person's assistant. A channel address (a Telegram chat, a number) is never moved from one account to another.
+* **Phone calls:** caller ID can be faked, so a call gets the person's memory, schedule and tools only when their carrier vouches for the number (STIR/SHAKEN "A") or they say their voice PIN (checked in code, never seen by the model, 3 tries per call and 5 wrong PINs a day). Otherwise a restricted assistant answers general questions and stores nothing. Calls never get email or Drive tools and can't approve anything: approvals are texted.
+* **Limits:** reminders repeat at most every 15 minutes, tasks at most hourly; 60 scheduled items and 24 task runs per person per day (`MAX_SCHEDULED_ITEMS`, `MAX_TASK_RUNS_PER_DAY`).
+* **Deletion:** "Forget everything" deletes the memory bank; deleting the account cancels the subscription, then removes all rows (cascade) and the bank.
 
 ## Layout
 
@@ -106,7 +111,7 @@ scripts/            Telnyx setup
 
 ## Known limits
 
-* Inbound phone calls identify the person by caller ID only.
+* Prompt injection: a web page or email can still try to steer the model within a turn (for example, to put private details into a `web_read` URL). Sending, inviting, deleting, calling and repeating tasks are gated, but reading the web isn't.
 * Reply streaming on the phone is sentence-chunked after generation, not token streaming.
 * The memory model calls (fact extraction, profile refresh) are billed to the deployment, not shown per user yet.
 * One shared process handles all users; the per-user isolated-instance design for privacy-sensitive customers is in Tarka's roadmap notes (`isolated-user-agents`).

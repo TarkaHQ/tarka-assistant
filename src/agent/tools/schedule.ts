@@ -1,9 +1,28 @@
 import { DateTime } from 'luxon';
 import { z } from 'zod';
+import { config } from '../../config.js';
 import { routines } from '../../db/repo.js';
 import type { Routine } from '../../db/types.js';
-import { describeCron, nextCronRun, parseWhen, repeatToCron, safeZone, shortLocal } from '../../util/time.js';
+import { describeCron, minCronGapMinutes, nextCronRun, parseWhen, repeatToCron, safeZone, shortLocal } from '../../util/time.js';
 import { defineTool, type ToolContext, type ToolSpec } from './spec.js';
+
+/** How often something may repeat: reminders every 15 minutes at most, agent tasks hourly. */
+const MIN_GAP_MINUTES = { reminder: 15, task: 60 } as const;
+
+function assertGap(cron: string, tz: string, kind: keyof typeof MIN_GAP_MINUTES): void {
+  const gap = minCronGapMinutes(cron, tz);
+  if (gap < MIN_GAP_MINUTES[kind]) {
+    const limit = kind === 'task' ? 'once an hour' : 'every 15 minutes';
+    throw new Error(`That would repeat every ${Math.max(1, Math.round(gap))} minutes; ${kind === 'task' ? 'scheduled tasks' : 'reminders'} can repeat at most ${limit}. Suggest a less frequent schedule.`);
+  }
+}
+
+async function assertRoom(ctx: ToolContext): Promise<void> {
+  const max = config().limits.scheduledItems;
+  if ((await routines.countOwn(ctx.user.id)) >= max) {
+    throw new Error(`The user already has ${max} reminders and scheduled tasks, which is the limit. Offer to cancel some (list_scheduled) first.`);
+  }
+}
 
 const whenField = z
   .string()
@@ -13,7 +32,7 @@ const repeatField = z
   .optional()
   .describe('Optional repeat: daily | weekdays | weekends | weekly | monthly | hourly, or a 5-field cron expression in local time');
 
-function resolveSchedule(when: string, repeat: string | undefined, ctx: ToolContext) {
+function resolveSchedule(when: string, repeat: string | undefined, ctx: ToolContext, kind: keyof typeof MIN_GAP_MINUTES) {
   const tz = safeZone(ctx.user.timezone);
   const first = parseWhen(when, tz, ctx.now);
   if (!first) throw new Error(`I couldn't work out the time from "${when}". Ask the user for a specific time.`);
@@ -23,6 +42,7 @@ function resolveSchedule(when: string, repeat: string | undefined, ctx: ToolCont
   if (!repeat) return { scheduleType: 'once' as const, runAt: first, cron: null, nextRunAt: first };
   const cron = repeatToCron(repeat, DateTime.fromJSDate(first).setZone(tz));
   if (!cron) throw new Error(`Unsupported repeat rule "${repeat}"`);
+  assertGap(cron, tz, kind);
   const firstRun = first.getTime() >= ctx.now.getTime() ? first : nextCronRun(cron, tz, ctx.now);
   return { scheduleType: 'cron' as const, runAt: null, cron, nextRunAt: firstRun };
 }
@@ -58,7 +78,8 @@ export const scheduleTools: ToolSpec[] = [
       repeat: repeatField,
     }),
     run: async ({ text, when, repeat }, ctx) => {
-      const s = resolveSchedule(when, repeat, ctx);
+      const s = resolveSchedule(when, repeat, ctx, 'reminder');
+      await assertRoom(ctx);
       const r = await routines.create(ctx.user.id, {
         kind: 'reminder',
         title: text,
@@ -78,15 +99,24 @@ export const scheduleTools: ToolSpec[] = [
     name: 'schedule_task',
     label: 'Scheduling a task',
     description:
-      'Schedule work for you (the assistant) to do later, once or on repeat, then message the user the result. The instructions run as a fresh request with all your tools. Use for "every Monday send me…", "check the price of… each morning", "on Friday look up…", or to follow up on something you promised.',
+      'Schedule work for you (the assistant) to do later, once or on repeat (at most hourly), then message the user the result. The instructions run as a fresh request with all your tools. Use for "every Monday send me…", "check the price of… each morning", "on Friday look up…", or to follow up on something you promised. A repeating task needs the user’s approval.',
     input: z.object({
-      title: z.string().min(1).describe('Short name, e.g. "Weekly plan"'),
-      instructions: z.string().min(5).describe('What to do at that time, written to yourself in detail'),
+      title: z.string().min(1).max(120).describe('Short name, e.g. "Weekly plan"'),
+      instructions: z.string().min(5).max(2000).describe('What to do at that time, written to yourself in detail'),
       when: whenField,
       repeat: repeatField,
     }),
+    // A repeating task acts on its own, with every tool, for as long as it exists: the user signs off
+    // on exactly what it will do (and an instruction smuggled in by an email or web page can't set one up).
+    approval: (i, ctx) => {
+      if (!i.repeat) return null;
+      const tz = safeZone(ctx.user.timezone);
+      const s = resolveSchedule(i.when, i.repeat, ctx, 'task');
+      return `Set up a repeating task “${i.title}”, ${describeCron(s.cron!)}${s.nextRunAt ? `, starting ${shortLocal(s.nextRunAt, tz)}` : ''}. Each time I will:\n${i.instructions}`;
+    },
     run: async ({ title, instructions, when, repeat }, ctx) => {
-      const s = resolveSchedule(when, repeat, ctx);
+      const s = resolveSchedule(when, repeat, ctx, 'task');
+      await assertRoom(ctx);
       const r = await routines.create(ctx.user.id, {
         kind: 'task',
         title,
@@ -136,17 +166,29 @@ export const scheduleTools: ToolSpec[] = [
       id: z.string().min(4),
       when: whenField.optional(),
       repeat: repeatField,
-      text: z.string().optional().describe('New reminder text or task title'),
-      instructions: z.string().optional(),
+      text: z.string().max(200).optional().describe('New reminder text or task title'),
+      instructions: z.string().max(2000).optional(),
       resume: z.boolean().optional(),
     }),
+    // Making a task repeat, or changing what a repeating task does, needs the same sign-off as
+    // creating one.
+    approval: async (i, ctx) => {
+      const r = await findRoutine(ctx.user.id, i.id);
+      if (r.kind !== 'task') return null;
+      const repeats = Boolean(i.repeat) || r.schedule_type === 'cron';
+      if (!repeats || (!i.repeat && i.instructions === undefined)) return null;
+      const what = i.instructions ?? r.instructions ?? r.title;
+      const schedule = i.repeat ? `repeat ${i.repeat}` : r.cron ? describeCron(r.cron) : 'repeat';
+      return `Change the repeating task “${i.text ?? r.title}” (${schedule}). Each time I will:\n${what}`;
+    },
     run: async ({ id, when, repeat, text, instructions, resume }, ctx) => {
       const r = await findRoutine(ctx.user.id, id);
       const tz = safeZone(ctx.user.timezone);
       const patch: Parameters<typeof routines.update>[2] = { title: text, instructions };
+      const kind = r.kind === 'reminder' ? 'reminder' : 'task';
       if (repeat) {
         const anchor = when ?? (r.next_run_at ? DateTime.fromJSDate(r.next_run_at).setZone(tz).toFormat("yyyy-LL-dd'T'HH:mm") : 'tomorrow 9am');
-        const s = resolveSchedule(anchor, repeat, ctx);
+        const s = resolveSchedule(anchor, repeat, ctx, kind);
         Object.assign(patch, { scheduleType: s.scheduleType, cron: s.cron, runAt: s.runAt, nextRunAt: s.nextRunAt });
       } else if (when) {
         if (r.schedule_type === 'cron' && r.cron) {
@@ -159,7 +201,7 @@ export const scheduleTools: ToolSpec[] = [
           const cron = fields.join(' ');
           Object.assign(patch, { cron, nextRunAt: nextCronRun(cron, tz, ctx.now) });
         } else {
-          const s = resolveSchedule(when, undefined, ctx);
+          const s = resolveSchedule(when, undefined, ctx, kind);
           Object.assign(patch, { runAt: s.runAt, nextRunAt: s.nextRunAt });
         }
       }

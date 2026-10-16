@@ -1,3 +1,4 @@
+import { createHmac } from 'node:crypto';
 import { z } from 'zod';
 
 /**
@@ -84,6 +85,10 @@ const schema = z.object({
   PROACTIVE_ENABLED: bool(true),
   MAX_PROACTIVE_PER_DAY: int(4),
   SCHEDULER_INTERVAL_MS: int(20000),
+
+  // Per-user ceilings (cost and abuse)
+  MAX_TASK_RUNS_PER_DAY: int(24),
+  MAX_SCHEDULED_ITEMS: int(60),
 
   // Telegram
   TELEGRAM_BOT_TOKEN: opt,
@@ -188,9 +193,15 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env) {
       maxPerDay: c.MAX_PROACTIVE_PER_DAY,
       schedulerIntervalMs: c.SCHEDULER_INTERVAL_MS,
     },
+    limits: {
+      taskRunsPerDay: c.MAX_TASK_RUNS_PER_DAY,
+      scheduledItems: c.MAX_SCHEDULED_ITEMS,
+    },
     telegram: {
       token: c.TELEGRAM_BOT_TOKEN,
-      webhookSecret: c.TELEGRAM_WEBHOOK_SECRET,
+      // Telegram echoes this in a header on every webhook call; without one anyone could post
+      // fake updates. Derived from APP_SECRET when not set (Telegram allows A-Z a-z 0-9 _ -).
+      webhookSecret: c.TELEGRAM_WEBHOOK_SECRET ?? createHmac('sha256', c.APP_SECRET).update('telegram-webhook').digest('base64url'),
       mode: telegramMode as 'webhook' | 'polling' | 'off',
     },
     telnyx: {

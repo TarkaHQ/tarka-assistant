@@ -78,7 +78,7 @@ code, .mono { font-family: var(--font-mono); font-size: 0.86em; }
 .btn.small { min-height: 32px; padding: 0 12px; font-size: 0.88rem; }
 .btn.danger { background: var(--surface); color: #a3341a; border-color: #e7b8a9; }
 .btn[disabled] { opacity: 0.5; cursor: progress; }
-input[type="text"], input[type="email"], input[type="search"], input[type="time"], select, textarea {
+input[type="text"], input[type="email"], input[type="search"], input[type="time"], input[type="password"], select, textarea {
   width: 100%; min-height: 42px; padding: 9px 12px; border: 1px solid var(--rule-strong); border-radius: var(--radius); background: var(--surface); color: var(--text-strong);
 }
 textarea { resize: vertical; min-height: 44px; line-height: 1.5; }

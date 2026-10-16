@@ -15,7 +15,7 @@ Everything here is optional except a Tarka model key. Each channel plugs into th
 ## Telegram
 
 1. In Telegram, message **@BotFather** → `/newbot` → pick a name and a username ending in `bot`.
-2. Set `TELEGRAM_BOT_TOKEN` and a random `TELEGRAM_WEBHOOK_SECRET`.
+2. Set `TELEGRAM_BOT_TOKEN`. `TELEGRAM_WEBHOOK_SECRET` is optional: without it a secret is derived from `APP_SECRET`, and updates without it are rejected.
 3. In production the app registers `PUBLIC_URL/webhooks/telegram` itself on start. In development it long-polls (no public URL needed).
 4. Optional, in BotFather: `/setdescription`, `/setuserpic`, and `/setcommands` with `dashboard - Open your dashboard`.
 
@@ -43,11 +43,15 @@ US carriers block application-to-person texts from unregistered numbers.
 * **Toll-free verification** (toll-free numbers): one form in the portal. Use case: *"Personal AI assistant. Users opt in by texting the number first or by entering their number on our site; the assistant replies to their requests and sends reminders they schedule. STOP/HELP supported."* Include the sign-up page URL and sample messages.
 * **10DLC** (local numbers): register the brand (Tarka's legal name, EIN, address, website), then a campaign (use case *Mixed* or *Customer care*) with the same description, opt-in flow and samples.
 
-STOP, UNSUBSCRIBE and similar words mark the number as opted out; nothing is sent until the person texts START.
+On SMS and WhatsApp, STOP, UNSUBSCRIBE, CANCEL, END and QUIT mark the number as opted out; nothing is sent until the person texts START. (On Telegram and the web these are ordinary words.) Approval prompts say "reply NO if not", never "cancel", so nobody opts out by accident.
 
 ### Phone calls
 
-* **Calling it:** people ring the number; the inbound assistant answers and sends each turn to `/voice/v1/chat/completions` with the caller's number in `extra_metadata`. Known callers get their assistant with memory and tools (no email or Drive on calls, since caller ID can be spoofed). Anything that needs approval is texted to them to confirm.
+* **Calling it:** people ring the number; the inbound assistant answers and sends each turn to `/voice/v1/chat/completions` with the caller's number in `extra_metadata`. Caller ID can be faked, so a caller gets their own assistant (memory, schedule, lists, calendar) only when:
+  * their carrier vouches for the number: STIR/SHAKEN attestation "A" in the `telnyx_shaken_stir_attestation` variable Telnyx forwards with `forward_metadata` (check a test call's request if you rely on this), unless they ticked *Always ask for my PIN*; or
+  * they say their **voice PIN** (Settings → Phone calls). The PIN is checked in code and never reaches the model or the conversation; 3 tries per call, and 5 different wrong PINs in a day pause PIN access and text the account holder.
+
+  Otherwise the call gets a restricted assistant (weather and web search, nothing personal, nothing stored). Calls never get email or Drive tools, and anything that needs approval is texted to the person to confirm.
 * **It calls businesses:** the `call_business` tool (approval required) schedules a call from the concierge assistant. During the call this app plays the role of a polite AI caller with the objective, keeps the transcript, and when the call ends texts the user a summary.
 
 ## WhatsApp

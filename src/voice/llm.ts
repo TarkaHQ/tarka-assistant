@@ -3,20 +3,26 @@ import type { Context } from 'hono';
 import { streamSSE } from 'hono/streaming';
 import { timingSafeEqual } from 'node:crypto';
 import { config } from '../config.js';
-import { calls, identities, users, usage } from '../db/repo.js';
-import type { User } from '../db/types.js';
+import { audit, calls, identities, kv, users, usage } from '../db/repo.js';
+import type { CallRow, User } from '../db/types.js';
 import { log } from '../log.js';
 import { chatModel, costMicroUsd } from '../models/tarka.js';
+import { approvalButtons, withApprovalNotice } from '../agent/approvals.js';
 import { runTurn } from '../agent/turn.js';
 import { formatFor } from '../channels/format.js';
 import { sendToUser } from '../channels/deliver.js';
+import { proactiveChannel } from '../proactive/scheduler.js';
+import { upgradeLink } from '../web/links.js';
+import { checkCaller, pinAttempt } from './pin.js';
 
 /**
  * OpenAI-compatible endpoint that Telnyx AI Assistants call as their "custom LLM". Telnyx does the
  * telephony, speech-to-text and text-to-speech; this endpoint is the brain:
  *
  *  - concierge calls (extra_metadata.ta_call_id): the agent is phoning a business for a user;
- *  - inbound calls: the user rings their assistant; same memory and tools as text channels.
+ *  - inbound calls: the user rings their assistant. Caller ID can be faked, so a caller gets their
+ *    memory and tools only when the carrier vouches for the number (STIR/SHAKEN "A") or they say
+ *    their voice PIN; otherwise a restricted assistant with nothing personal answers.
  */
 
 interface OAIMessage {
@@ -102,9 +108,18 @@ function transcriptOf(msgs: OAIMessage[]): string {
     .join('\n');
 }
 
-async function conciergeReply(req: OAIRequest, callId: string): Promise<{ text: string; toolCalls: { id: string; name: string; args: string }[] }> {
-  const call = await calls.get(callId);
-  if (!call) return { text: "Sorry, I think I've called the wrong number. Goodbye.", toolCalls: [] };
+/** A concierge call is only served while it is live, recent, and to the number the user approved. */
+function conciergeCallValid(call: CallRow | null, meta: Record<string, unknown>): call is CallRow {
+  if (!call || call.direction !== 'outbound') return false;
+  if (!['scheduled', 'in_progress', 'queued'].includes(call.status)) return false;
+  if (Date.now() - call.created_at.getTime() > 3 * 3600_000) return false;
+  const target = typeof meta.telnyx_end_user_target === 'string' ? meta.telnyx_end_user_target : null;
+  return !target || !call.to_number || target === call.to_number;
+}
+
+async function conciergeReply(req: OAIRequest, callId: string, meta: Record<string, unknown>): Promise<{ text: string; toolCalls: { id: string; name: string; args: string }[] }> {
+  const call = await calls.get(callId).catch(() => null);
+  if (!conciergeCallValid(call, meta)) return { text: "Sorry, I think I've called the wrong number. Goodbye.", toolCalls: [] };
   const user = await users.get(call.user_id);
   const msgs = req.messages ?? [];
   await calls.update(call.id, { status: 'in_progress', transcript: transcriptOf(msgs) });
@@ -143,27 +158,92 @@ async function conciergeReply(req: OAIRequest, callId: string): Promise<{ text: 
   };
 }
 
-async function personalReply(req: OAIRequest, caller: string): Promise<string> {
+function planAllows(user: User): boolean {
+  if (!config().stripe.enabled || user.plan !== 'trial') return true;
+  return !user.trial_ends_at || user.trial_ends_at.getTime() > Date.now();
+}
+
+/** Once per `hours` per key (stops a looping call from texting the user over and over). */
+async function onceEvery(key: string, hours: number): Promise<boolean> {
+  const last = await kv.get<number>(key);
+  if (last && Date.now() - last < hours * 3600_000) return false;
+  await kv.set(key, Date.now());
+  return true;
+}
+
+/** This call's earlier turns for an unverified caller, with anything that looks like a PIN removed. */
+function callHistory(msgs: OAIMessage[]): ModelMessage[] {
+  const turns = msgs.filter((m) => (m.role === 'user' || m.role === 'assistant') && textOf(m.content).trim());
+  const lastUser = turns.map((m) => m.role).lastIndexOf('user');
+  const out: ModelMessage[] = [];
+  for (const m of turns.slice(0, lastUser)) {
+    const text = textOf(m.content).trim();
+    const content = m.role === 'user' && pinAttempt(text) ? '[said a PIN]' : text;
+    out.push(m.role === 'user' ? { role: 'user', content } : { role: 'assistant', content });
+  }
+  while (out.length && out[0]!.role !== 'user') out.shift();
+  return out;
+}
+
+async function personalReply(req: OAIRequest, caller: string, meta: Record<string, unknown>): Promise<string> {
+  const cfg = config();
   let user: User | null = null;
   const identity = (await identities.find('voice', caller)) ?? (await identities.find('sms', caller)) ?? (await identities.find('whatsapp', caller));
   if (identity) user = await users.get(identity.user_id);
   if (!user) user = await users.byPhone(caller);
   if (!user) {
-    return `Hi! I'm ${config().product.assistantName}, a personal assistant. I don't recognise this number yet. Text me at this number or sign up at ${config().publicUrl.replace(/^https?:\/\//, '')}, and then you can call me any time.`;
+    return `Hi! I'm ${cfg.product.assistantName}, a personal assistant. I don't recognise this number yet. Text me at this number or sign up at ${cfg.publicUrl.replace(/^https?:\/\//, '')}, and then you can call me any time.`;
   }
-  if (!identity || identity.channel !== 'voice') await identities.create(user.id, 'voice', caller, null, true);
-  const lastUser = [...(req.messages ?? [])].reverse().find((m) => m.role === 'user');
-  const said = textOf(lastUser?.content).trim();
-  if (!said) return `Hi${user.name ? ` ${user.name}` : ''}! What can I do for you?`;
-  const turn = await runTurn({ user, channel: 'voice', text: said, trigger: 'message', persistUserMessage: true });
+  if (user.status === 'deleted' || user.status === 'paused') return 'Sorry, this assistant is switched off right now. Goodbye.';
+  if (!identity || identity.channel !== 'voice') await identities.create(user.id, 'voice', caller, null, true).catch(() => {});
+
+  const utterances = (req.messages ?? []).filter((m) => m.role === 'user').map((m) => textOf(m.content).trim()).filter(Boolean);
+  const said = utterances.at(-1) ?? '';
+  const attestation = typeof meta.telnyx_shaken_stir_attestation === 'string' ? meta.telnyx_shaken_stir_attestation : undefined;
+  const check = await checkCaller(user, utterances, attestation);
+  if (check.lockedNow) {
+    await sendToUser(user, 'Someone tried several wrong voice PINs on a call from your number, so PIN access on calls is paused for a day. Nothing personal was shared. If that was you, you can text me as usual.', {
+      proactive: true,
+      persist: { role: 'assistant', meta: { source: 'security' } },
+    }).catch(() => {});
+    await audit.add(user.id, 'system', 'voice.pin_locked', {});
+  }
+  // A PIN utterance is answered here in code; it never reaches the model or the conversation.
+  if (check.pinReply) return check.pinReply;
+
+  const name = user.assistant_name || cfg.product.assistantName;
+  if (!said) {
+    if (check.trusted) return `Hi${user.name ? ` ${user.name}` : ''}! What can I do for you?`;
+    return user.settings.voicePin
+      ? `Hi! It's ${name}. Say your voice PIN for anything personal, or just ask me something.`
+      : `Hi! It's ${name}. What can I do for you?`;
+  }
+
+  if (!planAllows(user)) {
+    if (await onceEvery(`voice-trial:${user.id}`, 6)) {
+      await sendToUser(user, `Your free trial has ended. Keep me going for ${cfg.product.priceLabel}: ${upgradeLink(user)}`, { persist: { role: 'assistant' } }).catch(() => {});
+    }
+    return "Your free trial has ended, so I can't help on calls right now. I've texted you a link to keep me going.";
+  }
+
+  if (!check.trusted) {
+    // Caller ID alone isn't proof: a restricted assistant with nothing personal, and nothing stored.
+    if (utterances.length === 1) await audit.add(user.id, 'system', 'voice.unverified_call', { summary: `Call from ${caller}: “${said.slice(0, 120)}”` });
+    const turn = await runTurn({
+      user, channel: 'voice', text: said, trigger: 'message',
+      restricted: { pinSet: Boolean(user.settings.voicePin), history: callHistory(req.messages ?? []) },
+    });
+    return formatFor('voice', turn.text);
+  }
+
+  const turn = await runTurn({ user, channel: 'voice', text: said, trigger: 'message', persistUserMessage: true, userMeta: { verifiedBy: check.how } });
   // Approvals are confirmed in writing, on the person's own text channel.
-  for (const a of turn.approvals) {
-    await sendToUser(user, `From our call — reply YES to confirm or NO to cancel:\n${a.summary}`, {
-      buttons: [
-        { label: 'Yes, go ahead', data: `ap:${a.id}:y` },
-        { label: 'No', data: `ap:${a.id}:n` },
-      ],
-      persist: { role: 'assistant', meta: { source: 'approval', approvals: [a.id] } },
+  if (turn.approvals.length) {
+    const channel = await proactiveChannel(user);
+    await sendToUser(user, withApprovalNotice('From our call:', turn.approvals, channel === 'web' ? 'sms' : channel), {
+      channel,
+      buttons: approvalButtons(turn.approvals),
+      persist: { role: 'assistant', meta: { source: 'approval', approvals: turn.approvals.map((a) => a.id) } },
     }).catch((err) => log.warn({ err: String(err) }, 'could not text an approval request'));
   }
   return formatFor('voice', turn.text);
@@ -198,10 +278,10 @@ export async function voiceCompletions(c: Context): Promise<Response> {
   let toolCalls: { id: string; name: string; args: string }[] = [];
   try {
     if (typeof meta.ta_call_id === 'string') {
-      ({ text, toolCalls } = await conciergeReply(req, meta.ta_call_id));
+      ({ text, toolCalls } = await conciergeReply(req, meta.ta_call_id, meta));
     } else {
       const caller = String(meta.telnyx_end_user_target ?? meta.from ?? '');
-      text = caller ? await personalReply(req, caller) : "Sorry, I can't tell who's calling. Please call from the number you registered.";
+      text = caller ? await personalReply(req, caller, meta) : "Sorry, I can't tell who's calling. Please call from the number you registered.";
     }
   } catch (err) {
     log.error({ err: String(err) }, 'voice completion failed');

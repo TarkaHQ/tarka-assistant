@@ -21,15 +21,17 @@ Totals: 3.55 vCPU and about 5.5 GiB of limits, inside the core tier.
 
 1. **Publish the image.** Push this repository to GitHub (e.g. `TarkaHQ/tarka-assistant`). The `ci` workflow tests it and pushes `ghcr.io/tarkahq/tarka-assistant:latest` and `:<sha>`. Either make the package public, or give the host a GitHub username and a classic PAT with `read:packages` (the agent host's *GitHub registry credentials*). Pin the `:<sha>` tag in the compose file for production.
 2. **Free a host slot.** Organisations have two active agent hosts by default.
-3. **Create the host** in the console (Agent Hosts → Custom Compose) or with the Control API, `POST /control/v1/orgs/{org_id}/agent-hosts` with `compose_yaml`, `variables` and `runtime.platform_services: ["app"]`. Required variables: `APP_SECRET` (`openssl rand -base64 48`), `POSTGRES_PASSWORD` (letters and digits), and `PUBLIC_URL`.
+3. **Create the host** in the console (Agent Hosts → Custom Compose) or with the Control API, `POST /control/v1/orgs/{org_id}/agent-hosts` with `compose_yaml`, `variables` and `runtime.platform_services: ["app"]`. Required variables: `APP_SECRET` (`openssl rand -base64 48`), `POSTGRES_PASSWORD` (letters and digits), `HINDSIGHT_API_KEY` (`openssl rand -hex 32`; only the app can then use the memory API), and `PUBLIC_URL`.
 4. **Set `PUBLIC_URL`.** The address (`https://<name>-<id>.tarka.site`) exists only after the host is created. Copy it into `PUBLIC_URL` and redeploy. Sign-in links, OAuth redirects and the Telegram webhook use it.
 5. **Add channels** with the variables in [channels.md](channels.md). Telegram registers its webhook on start; Telnyx and Stripe webhooks are configured on their side to point at `PUBLIC_URL/webhooks/…`.
 6. **Check it:** `PUBLIC_URL/healthz` returns `{"ok":true,"memory":true,…}` once Hindsight has downloaded its models (first start takes a few minutes).
 
 ## Operating notes
 
+* **Limits:** `MAX_SCHEDULED_ITEMS` (60) and `MAX_TASK_RUNS_PER_DAY` (24) per person; `PROACTIVE_ENABLED=false` stops every agent-initiated turn (briefs, check-ins, tasks) while reminders still fire.
+* **Restarts:** a stopping worker waits 25 seconds for running turns; anything still running is retried once after the restart. Inbound messages are handled one at a time per person, and a failed one never holds back the next.
 * **Invites:** `SIGNUP_MODE=invite` by default. Add codes with SQL: `insert into invites (code, max_uses, note) values ('EARLY1', 50, 'friends');`
 * **Logs:** open a terminal on the `app` service from the console; logs are JSON lines.
 * **Backups:** back up the `db-data` volume; it holds conversations, schedules, encrypted tokens and every memory bank.
-* **Scaling:** run `ROLE=web` and `ROLE=worker` as separate services when one process is no longer enough. Inbound messages are ordered per person by the queue, so several workers are safe.
+* **Scaling:** run `ROLE=web` and `ROLE=worker` as separate services when one process is no longer enough. Inbound messages are handled one at a time per person by the queue, so several workers are safe.
 * **Per-user isolation:** this stack serves many users from one process. The roadmap's isolated-instance design (one sandboxed pod per user) would run this same image once per person with `MEMORY_ENABLED` pointing at a shared Hindsight.

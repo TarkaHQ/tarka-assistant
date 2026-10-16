@@ -658,10 +658,11 @@ export interface SettingsProps {
   googleAccount: string | null;
   identities: Identity[];
   billing: { enabled: boolean; plan: string; trialDaysLeft: number | null; status: string | null };
+  voice: { enabled: boolean };
   notice?: string;
 }
 
-export const SettingsPage: FC<SettingsProps> = ({ user, googleEnabled, googleAccount, identities, billing, notice }) => {
+export const SettingsPage: FC<SettingsProps> = ({ user, googleEnabled, googleAccount, identities, billing, voice, notice }) => {
   const s = user.settings;
   const brief = s.briefTime === undefined ? '07:30' : s.briefTime;
   const q = s.quietHours ?? { start: '22:00', end: '07:30' };
@@ -767,13 +768,49 @@ export const SettingsPage: FC<SettingsProps> = ({ user, googleEnabled, googleAcc
                 ) : (
                   <>
                     <p>Connect Gmail, Calendar, Drive and Contacts so it can plan your day, draft replies and book time.</p>
-                    <a class="btn small" style="margin-top:12px" href="/oauth/google/connect">
-                      Connect Google
-                    </a>
+                    <form method="post" action="/oauth/google/start" style="margin-top:12px">
+                      <button class="btn small" type="submit">
+                        Connect Google
+                      </button>
+                    </form>
                   </>
                 )}
               </div>
             </section>
+            {voice.enabled ? (
+              <section class="panel">
+                <div class="panel-head">
+                  <h2>Phone calls</h2>
+                </div>
+                <div class="panel-body">
+                  <p>
+                    Caller ID can be faked, so when you call, your assistant only uses your calendar, memory and lists once it knows it’s you: your carrier
+                    verifies your number, or you say your voice PIN.
+                  </p>
+                  <form id="voice-pin-form" style="margin-top:12px">
+                    <div class="field">
+                      <label for="voice_pin">{s.voicePin ? 'Change voice PIN' : 'Voice PIN'}</label>
+                      <input id="voice_pin" name="voice_pin" type="password" inputmode="numeric" autocomplete="off" pattern="\d{4,8}" placeholder="4 to 8 digits" />
+                      <p class="hint">{s.voicePin ? 'A PIN is set.' : 'No PIN yet.'} Never use your bank PIN.</p>
+                    </div>
+                    <label class="row" style="font-weight:500">
+                      <input type="checkbox" name="voice_require_pin" checked={Boolean(s.voiceRequirePin)} /> Always ask for my PIN
+                    </label>
+                    <div class="row" style="margin-top:10px;gap:8px">
+                      <button class="btn small" type="submit">
+                        Save
+                      </button>
+                      {s.voicePin ? (
+                        <button class="btn small secondary" type="button" data-voice-pin-remove>
+                          Remove PIN
+                        </button>
+                      ) : null}
+                      <span class="hint" id="voice-pin-status"></span>
+                    </div>
+                  </form>
+                </div>
+              </section>
+            ) : null}
             <section class="panel">
               <div class="panel-head">
                 <h2>Channels</h2>

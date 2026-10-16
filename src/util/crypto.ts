@@ -27,16 +27,35 @@ export function randomToken(bytes = 32): string {
 }
 
 /** Short human-friendly code (no ambiguous characters). */
-export function shortCode(length = 6): string {
-  const alphabet = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
-  const bytes = randomBytes(length);
+export function shortCode(length = 6, alphabet = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'): string {
+  // Rejection sampling keeps every character equally likely.
+  const limit = 256 - (256 % alphabet.length);
   let out = '';
-  for (let i = 0; i < length; i++) out += alphabet[bytes[i]! % alphabet.length];
+  while (out.length < length) {
+    for (const b of randomBytes(length * 2)) {
+      if (b < limit) out += alphabet[b % alphabet.length];
+      if (out.length === length) break;
+    }
+  }
   return out;
 }
 
+/** Approval codes have no vowels, so a code can never spell a word like YEAH or NOPE. */
+export const APPROVAL_CODE_ALPHABET = 'BCDFGHJKLMNPQRSTVWXZ23456789';
+
 export function sha256(input: string): string {
   return createHash('sha256').update(input).digest('hex');
+}
+
+/** Keyed hash (e.g. for voice PINs): useless without APP_SECRET. */
+export function keyedHash(purpose: string, value: string): string {
+  return createHmac('sha256', key(`hash:${purpose}`)).update(value).digest('base64url');
+}
+
+/** A stable UUID derived from a string (used as a job id so redelivered webhooks are queued once). */
+export function stableUuid(input: string): string {
+  const h = createHash('sha256').update(input).digest('hex');
+  return `${h.slice(0, 8)}-${h.slice(8, 12)}-5${h.slice(13, 16)}-${((parseInt(h[16]!, 16) & 0x3) | 0x8).toString(16)}${h.slice(17, 20)}-${h.slice(20, 32)}`;
 }
 
 export function sign(payload: string, purpose = 'state'): string {

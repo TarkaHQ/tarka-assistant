@@ -11,6 +11,7 @@ services:
     environment:
       DATABASE_URL: postgres://assistant:${POSTGRES_PASSWORD:-assistant}@db:5432/assistant
       HINDSIGHT_URL: http://hindsight:8888
+      HINDSIGHT_API_KEY: ${HINDSIGHT_API_KEY:-change-me-memory-key}
       ROLE: all
     ports: ["8080:8080"]
     depends_on:
@@ -38,6 +39,9 @@ services:
     environment:
       HINDSIGHT_API_DATABASE_URL: postgresql://assistant:${POSTGRES_PASSWORD:-assistant}@db:5432/assistant
       HINDSIGHT_API_DATABASE_SCHEMA: hindsight
+      # Only callers with the key (the app) can use the memory API.
+      HINDSIGHT_API_TENANT_EXTENSION: hindsight_api.extensions.builtin.tenant:ApiKeyTenantExtension
+      HINDSIGHT_API_TENANT_API_KEY: ${HINDSIGHT_API_KEY:-change-me-memory-key}
       # Hindsight's own model calls (fact extraction, reflect) go to Tarka too.
       HINDSIGHT_API_LLM_PROVIDER: openai
       HINDSIGHT_API_LLM_BASE_URL: ${TARKA_BASE_URL:-https://tarka.rest/v1}

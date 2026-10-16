@@ -11,7 +11,7 @@ export const smsAdapter: ChannelAdapter = {
   enabled: () => Boolean(config().telnyx.apiKey && config().telnyx.phoneNumber),
   async send(identity: Identity, msg: OutboundMessage) {
     let text = formatFor('sms', msg.text);
-    if (msg.buttons?.length && !/\b(yes|no)\b/i.test(text)) text += '\n\nReply YES to go ahead or NO to cancel.';
+    if (msg.buttons?.length && !/\b(yes|no)\b/i.test(text)) text += '\n\nReply YES to go ahead, or NO if not.';
     let id: string | undefined;
     for (const part of splitMessage(text, 1500)) id = await sendSms(identity.external_id, part);
     return { providerMessageId: id };
@@ -33,7 +33,7 @@ export const whatsappAdapter: ChannelAdapter = {
   enabled: () => Boolean(config().telnyx.apiKey && config().telnyx.whatsappNumber),
   async send(identity: Identity, msg: OutboundMessage) {
     let text = formatFor('whatsapp', msg.text);
-    if (msg.buttons?.length && !/\b(yes|no)\b/i.test(text)) text += '\n\nReply *YES* to go ahead or *NO* to cancel.';
+    if (msg.buttons?.length && !/\b(yes|no)\b/i.test(text)) text += '\n\nReply *YES* to go ahead, or *NO* if not.';
     const open = identity.last_inbound_at && Date.now() - identity.last_inbound_at.getTime() < WINDOW_MS;
     if (!open) {
       const template = config().telnyx.whatsappTemplate;

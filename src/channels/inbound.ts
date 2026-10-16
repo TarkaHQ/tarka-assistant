@@ -1,19 +1,21 @@
 import { config } from '../config.js';
-import { auth, audit, identities, invites, kv, messages, users } from '../db/repo.js';
+import { auth, audit, identities, IdentityTaken, invites, kv, messages, users } from '../db/repo.js';
 import type { ChannelName, Identity, User } from '../db/types.js';
 import { log } from '../log.js';
 import { memory } from '../memory/hindsight.js';
 import { ocr, speak, transcribe } from '../models/tarka.js';
-import { decideApproval, matchApprovalReply } from '../agent/approvals.js';
+import { approvalButtons, clarifyMessage, decideApproval, decideApprovals, matchApprovalReply, withApprovalNotice } from '../agent/approvals.js';
 import { runTurn, type TurnResult } from '../agent/turn.js';
 import { dashboardLink, upgradeLink } from '../web/links.js';
 import { sendToUser } from './deliver.js';
 import { adapterFor } from './registry.js';
 import { whatsappAllowed } from './telnyx.js';
-import type { InboundMessage, OutboundButton } from './types.js';
+import type { InboundMessage } from './types.js';
 
+/** Carrier opt-out keywords. They apply to SMS and WhatsApp only (elsewhere "stop" is just a word). */
 const STOP_WORDS = /^(stop|stopall|unsubscribe|cancel|end|quit)$/i;
 const START_WORDS = /^(start|unstop|subscribe)$/i;
+const OPT_OUT_CHANNELS: ChannelName[] = ['sms', 'whatsapp'];
 
 const COUNTRY_TZ: Record<string, string> = {
   DE: 'Europe/Berlin', GB: 'Europe/London', FR: 'Europe/Paris', IT: 'Europe/Rome', ES: 'Europe/Madrid', NL: 'Europe/Amsterdam',
@@ -118,7 +120,17 @@ export async function handleInbound(msg: InboundMessage, opts: { onStatus?: (lab
     if (linkCode) {
       const userId = await auth.consumeLinkCode(linkCode);
       if (userId) {
-        identity = await identities.create(userId, msg.channel, msg.externalId, msg.displayName, true);
+        try {
+          identity = await identities.create(userId, msg.channel, msg.externalId, msg.displayName, true);
+        } catch (err) {
+          // Already someone else's address: never move it (that would hand over their conversation).
+          if (!(err instanceof IdentityTaken)) throw err;
+          await replyToIdentity(
+            msg,
+            `This ${channelLabel(msg.channel)} account is already connected to another ${cfg.product.productName} account. Remove it there first (Settings), then make a new link.`,
+          );
+          return { userId: identity?.user_id };
+        }
         const user = (await users.get(userId))!;
         const name = user.assistant_name || cfg.product.assistantName;
         const reply = `You're connected${user.name ? `, ${user.name}` : ''}! This is ${name}. Message me here any time.`;
@@ -132,10 +144,12 @@ export async function handleInbound(msg: InboundMessage, opts: { onStatus?: (lab
       }
     }
 
-    // Opt-out handling (SMS compliance; Telnyx also auto-responds to STOP).
-    if (STOP_WORDS.test(msg.text.trim())) {
+    // Opt-out handling (SMS/WhatsApp compliance; Telnyx also auto-responds to STOP).
+    if (OPT_OUT_CHANNELS.includes(msg.channel) && STOP_WORDS.test(msg.text.trim())) {
       await identities.optOut(msg.channel, msg.externalId);
       if (identity) await audit.add(identity.user_id, 'user', 'channel.opted_out', { channel: msg.channel });
+      // SMS opt-outs are confirmed by the carrier/Telnyx; WhatsApp gets one confirmation from us.
+      if (identity && msg.channel === 'whatsapp') await replyToIdentity(msg, "You won't get messages here any more. Send START to turn them back on.");
       return { userId: identity?.user_id };
     }
 
@@ -184,15 +198,14 @@ export async function handleInbound(msg: InboundMessage, opts: { onStatus?: (lab
     const match = await matchApprovalReply(user, msg.text);
     if (match?.kind === 'decision') {
       await messages.add(user.id, 'user', msg.channel, msg.text);
-      const outcome = await decideApproval(user, match.approval.id, match.decision, msg.channel);
+      const outcome = await decideApprovals(user, match.approvals, match.decision, msg.channel);
       await sendToUser(user, outcome.message, { channel: msg.channel, persist: { role: 'assistant', meta: { source: 'approval' } } });
       return { userId: user.id, reply: outcome.message };
     }
-    if (match?.kind === 'ambiguous') {
+    if (match?.kind === 'clarify') {
       await messages.add(user.id, 'user', msg.channel, msg.text);
-      const list = match.pending.map((a) => `• ${a.summary.split('\n')[0]} — reply "${match.decision === 'approved' ? 'yes' : 'no'} ${a.short_code}"`).join('\n');
-      const reply = `A few things are waiting for you. Which one?\n${list}`;
-      await sendToUser(user, reply, { channel: msg.channel, persist: { role: 'assistant' } });
+      const reply = clarifyMessage(match.pending, match.decision);
+      await sendToUser(user, reply, { channel: msg.channel, persist: { role: 'assistant', meta: { source: 'approval', approvals: match.pending.map((a) => a.id) } } });
       return { userId: user.id, reply };
     }
 
@@ -229,18 +242,14 @@ export async function handleInbound(msg: InboundMessage, opts: { onStatus?: (lab
     });
     user = (await users.get(user.id)) ?? user;
 
-    const buttons: OutboundButton[] = turn.approvals.length === 1
-      ? [
-          { label: 'Yes, go ahead', data: `ap:${turn.approvals[0]!.id}:y` },
-          { label: 'No', data: `ap:${turn.approvals[0]!.id}:n` },
-        ]
-      : [];
     let audio: Uint8Array | undefined;
     if (hadVoice && user.settings.voiceReplies && msg.channel === 'telegram') {
       audio = await speak(turn.text.slice(0, 1500)).catch(() => undefined);
     }
-    await sendToUser(user, turn.text, { channel: msg.channel, buttons, audio });
-    return { userId: user.id, reply: turn.text, turn };
+    // What the user approves is the code-written summary under the reply, not the model's wording.
+    const outgoing = withApprovalNotice(turn.text, turn.approvals, msg.channel);
+    await sendToUser(user, outgoing, { channel: msg.channel, buttons: approvalButtons(turn.approvals), audio });
+    return { userId: user.id, reply: outgoing, turn };
   } catch (err) {
     log.error({ err: err instanceof Error ? err.stack : String(err), channel: msg.channel }, 'inbound handling failed');
     const identity = await identities.find(msg.channel, msg.externalId).catch(() => null);
@@ -255,6 +264,10 @@ export async function handleInbound(msg: InboundMessage, opts: { onStatus?: (lab
 
 export function inboundKey(msg: Pick<InboundMessage, 'channel' | 'externalId'>): string {
   return `${msg.channel}:${msg.externalId}`;
+}
+
+function channelLabel(channel: ChannelName): string {
+  return channel === 'sms' ? 'phone number' : channel === 'whatsapp' ? 'WhatsApp' : channel === 'telegram' ? 'Telegram' : channel;
 }
 
 export type { ChannelName };

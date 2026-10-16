@@ -64,7 +64,9 @@ async function startWorker() {
   const bot = telegramBot();
   if (bot && cfg.telegram.mode === 'polling') {
     await bot.api.deleteWebhook().catch(() => {});
-    void bot.start({ drop_pending_updates: false, onStart: (me) => log.info({ bot: me.username }, 'telegram polling started') });
+    bot
+      .start({ drop_pending_updates: false, onStart: (me) => log.info({ bot: me.username }, 'telegram polling started') })
+      .catch((err) => log.error({ err: String(err) }, 'telegram polling stopped (check TELEGRAM_BOT_TOKEN)'));
   }
   log.info('worker started');
 }

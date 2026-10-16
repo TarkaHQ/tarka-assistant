@@ -12,7 +12,7 @@ import { buildInstructions, type Trigger } from './prompt.js';
 import { requestApproval } from './approvals.js';
 import { allTools, toolLabel } from './tools/index.js';
 import { primeGoogleAvailability } from './tools/google.js';
-import { toAiTools, type ToolContext } from './tools/spec.js';
+import { toAiTools, UNVERIFIED_VOICE_TOOLS, type ToolContext } from './tools/spec.js';
 
 export interface TurnInput {
   user: User;
@@ -28,6 +28,12 @@ export interface TurnInput {
   onStatus?: (label: string) => void;
   progress?: (text: string) => Promise<void>;
   abortSignal?: AbortSignal;
+  /**
+   * An unverified phone call: no history, memory or personal context; a few harmless tools; and
+   * nothing is written to the conversation or memory (the caller might not be the account holder).
+   * `history` is the call's own earlier turns.
+   */
+  restricted?: { pinSet: boolean; history: ModelMessage[] };
 }
 
 export interface TurnTrace {
@@ -105,26 +111,27 @@ export async function runTurn(input: TurnInput): Promise<TurnResult> {
   const started = Date.now();
   const user = (await users.get(input.user.id)) ?? input.user;
   const now = new Date();
+  const restricted = input.restricted;
 
-  // 1. Gather context in parallel.
-  const historyP = messages.recent(user.id, HISTORY_ROWS);
+  // 1. Gather context in parallel (none of it for an unverified caller).
+  const historyP = restricted ? Promise.resolve([] as MessageRow[]) : messages.recent(user.id, HISTORY_ROWS);
   let userMessage: MessageRow | undefined;
-  if (input.persistUserMessage) {
+  if (input.persistUserMessage && !restricted) {
     userMessage = await messages.add(user.id, 'user', input.channel, input.text, input.userMeta ?? {});
   }
   const memoryQuery = input.trigger === 'message' ? input.text : `${input.title ?? input.trigger} ${input.text}`.slice(0, 1000);
   const [history, recalled, upcoming, pending, googleConnected, integ, profile] = await Promise.all([
     historyP,
-    memory.recallForPrompt(user, memoryQuery),
-    routines.forUser(user.id).then((rs) => rs.filter((r) => r.status === 'active')),
-    approvalsRepo.pending(user.id),
-    primeGoogleAvailability(user.id),
-    integrations.get(user.id, 'google'),
-    profileFor(user),
+    restricted ? Promise.resolve({ text: '', items: [], ms: 0 }) : memory.recallForPrompt(user, memoryQuery),
+    restricted ? Promise.resolve([]) : routines.forUser(user.id).then((rs) => rs.filter((r) => r.status === 'active')),
+    restricted ? Promise.resolve([]) : approvalsRepo.pending(user.id),
+    restricted ? Promise.resolve(false) : primeGoogleAvailability(user.id),
+    restricted ? Promise.resolve(null) : integrations.get(user.id, 'google'),
+    restricted ? Promise.resolve(null) : profileFor(user),
   ]);
 
   // 2. Messages: prior conversation, then this turn.
-  const prior = historyToMessages(history.filter((m) => m.id !== userMessage?.id));
+  const prior = restricted ? restricted.history : historyToMessages(history.filter((m) => m.id !== userMessage?.id));
   let finalUser: string;
   switch (input.trigger) {
     case 'message':
@@ -154,10 +161,16 @@ export async function runTurn(input: TurnInput): Promise<TurnResult> {
     created: [],
   };
   const toolsUsed: string[] = [];
-  const tools = toAiTools(allTools, ctx, requestApproval, (name) => {
-    toolsUsed.push(name);
-    input.onStatus?.(toolLabel(name));
-  });
+  const tools = toAiTools(
+    allTools,
+    ctx,
+    requestApproval,
+    (name) => {
+      toolsUsed.push(name);
+      input.onStatus?.(toolLabel(name));
+    },
+    restricted ? UNVERIFIED_VOICE_TOOLS : undefined,
+  );
 
   const instructions = buildInstructions({
     user,
@@ -180,15 +193,18 @@ export async function runTurn(input: TurnInput): Promise<TurnResult> {
       billing: cfg.stripe.enabled,
     },
     trialDaysLeft: trialDaysLeft(user),
+    restricted: restricted ? { pinSet: restricted.pinSet } : undefined,
   });
 
-  // 4. Generate, with one fallback model on provider failure.
+  // 4. Generate, with one fallback model on provider failure. Only when no tool has run yet:
+  //    a retry after a tool ran could repeat what it did (a second reminder, a second request).
   const primary = pickModel(user);
   const candidates = [primary, ...(cfg.models.fallbackModel && cfg.models.fallbackModel !== primary ? [cfg.models.fallbackModel] : [])];
   let result: Awaited<ReturnType<typeof generateText>> | undefined;
   let usedModel = primary;
   let lastErr: unknown;
   for (const modelId of candidates) {
+    if (toolsUsed.length > 0) break;
     try {
       result = await generateText({
         model: chatModel(modelId),
@@ -249,7 +265,7 @@ export async function runTurn(input: TurnInput): Promise<TurnResult> {
   });
 
   let messageId: number | undefined;
-  if (!silent) {
+  if (!silent && !restricted) {
     const row = await messages.add(user.id, 'assistant', input.channel, text, {
       trace,
       proactive: input.trigger !== 'message',
@@ -259,10 +275,10 @@ export async function runTurn(input: TurnInput): Promise<TurnResult> {
     messageId = row.id;
   }
   for (const a of ctx.activity) await audit.add(user.id, 'agent', a.tool, { summary: a.summary });
-  await users.touch(user.id, input.channel === 'cli' ? 'web' : input.channel).catch(() => {});
+  if (!restricted) await users.touch(user.id, input.channel === 'cli' ? 'web' : input.channel).catch(() => {});
 
   // 6. Memory: retain real conversations asynchronously.
-  if (input.trigger === 'message' && !silent && memory.enabled) {
+  if (input.trigger === 'message' && !silent && memory.enabled && !restricted) {
     await enqueue('memory-retain', {
       userId: user.id,
       userText: input.text,

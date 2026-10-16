@@ -1,15 +1,18 @@
 import { describe, expect, it } from 'vitest';
 import { generateKeyPairSync, sign } from 'node:crypto';
 import { DateTime } from 'luxon';
-import { parseWhen, nextCronRun, repeatToCron, describeCron, isQuiet, endOfQuiet, isValidTimezone } from '../src/util/time.js';
+import { parseWhen, nextCronRun, repeatToCron, describeCron, isQuiet, endOfQuiet, isValidTimezone, minCronGapMinutes } from '../src/util/time.js';
 import { toPlain, toTelegramHtml, splitMessage, stripThinking, toWhatsApp } from '../src/channels/format.js';
 import { renderMarkdown } from '../src/util/markdown.js';
-import { encrypt, decrypt, sealState, openState } from '../src/util/crypto.js';
+import { encrypt, decrypt, sealState, openState, shortCode, APPROVAL_CODE_ALPHABET, stableUuid } from '../src/util/crypto.js';
 import { parseTelnyxMessage } from '../src/channels/telnyx.js';
 import { buildRaw, extractBody } from '../src/integrations/google.js';
 import { historyToMessages } from '../src/agent/turn.js';
 import { redactSecrets } from '../src/memory/hindsight.js';
-import { isPrivate } from '../src/util/net.js';
+import { assertPublicUrl, isPrivate, pinnedLookup, v6Groups } from '../src/util/net.js';
+import { pinAttempt } from '../src/voice/pin.js';
+import { safeNext } from '../src/web/links.js';
+import { loadConfig } from '../src/config.js';
 import { countryOf } from '../src/integrations/telnyx.js';
 import type { MessageRow } from '../src/db/types.js';
 
@@ -193,5 +196,97 @@ describe('safety helpers', () => {
     expect(isPrivate('169.254.169.254')).toBe(true);
     expect(isPrivate('::1')).toBe(true);
     expect(isPrivate('8.8.8.8')).toBe(false);
+  });
+  it('sees IPv4 hidden inside IPv6, and other special ranges', () => {
+    for (const a of [
+      '::ffff:127.0.0.1', '::ffff:7f00:1', '[::ffff:7f00:1]', '::ffff:a9fe:a9fe', '::127.0.0.1', '64:ff9b::a00:1', '64:ff9b::10.0.0.1',
+      '2002:7f00:1::', '0.0.0.0', '::', 'fd00::1', 'fe80::1%eth0', '100.100.100.200', '198.18.0.1', 'not-an-ip', '1::2::3',
+    ]) {
+      expect([a, isPrivate(a)]).toEqual([a, true]);
+    }
+    for (const a of ['8.8.8.8', '1.1.1.1', '2606:4700:4700::1111', '64:ff9b::808:808', '2a00:1450:4001::200e']) {
+      expect([a, isPrivate(a)]).toEqual([a, false]);
+    }
+  });
+  it('expands IPv6 groups', () => {
+    expect(v6Groups('::ffff:1.2.3.4')).toEqual([0, 0, 0, 0, 0, 0xffff, 0x0102, 0x0304]);
+    expect(v6Groups('64:ff9b::1.2.3.4')).toEqual([0x64, 0xff9b, 0, 0, 0, 0, 0x0102, 0x0304]);
+    expect(v6Groups('2001:db8::1')).toEqual([0x2001, 0xdb8, 0, 0, 0, 0, 0, 1]);
+    expect(v6Groups('1:2:3:4:5:6:7:8:9')).toBeNull();
+  });
+  it('refuses odd ports, credentials and internal names before any lookup', async () => {
+    await expect(assertPublicUrl('http://user:pw@example.com/')).rejects.toThrow(/credentials/);
+    await expect(assertPublicUrl('http://example.com:22/')).rejects.toThrow(/port/);
+    await expect(assertPublicUrl('http://tarka/v1/models')).rejects.toThrow(/not reachable/);
+    await expect(assertPublicUrl('http://metadata.google.internal/')).rejects.toThrow(/not reachable/);
+    await expect(assertPublicUrl('http://[::ffff:7f00:1]/')).rejects.toThrow(/not reachable/);
+    await expect(assertPublicUrl('http://2130706433/')).rejects.toThrow(/not reachable/); // 127.0.0.1 written as a number
+    await expect(assertPublicUrl('file:///etc/passwd')).rejects.toThrow(/http/);
+  });
+  it('pins the connection to checked addresses (DNS rebinding)', async () => {
+    const result = await new Promise<{ err: Error | null; addr: unknown }>((resolve) => {
+      pinnedLookup('127.0.0.1', { all: true }, (err, addr) => resolve({ err, addr }));
+    });
+    expect(result.err?.message).toMatch(/not reachable/);
+    const ok = await new Promise<{ err: Error | null; addr: unknown }>((resolve) => {
+      pinnedLookup('93.184.215.14', {}, (err, addr) => resolve({ err, addr }));
+    });
+    expect(ok).toEqual({ err: null, addr: '93.184.215.14' });
+  });
+});
+
+describe('approval codes', () => {
+  it('never contain vowels, so they can’t spell yes/no words', () => {
+    for (let i = 0; i < 200; i++) expect(shortCode(4, APPROVAL_CODE_ALPHABET)).toMatch(/^[BCDFGHJKLMNPQRSTVWXZ2-9]{4}$/);
+  });
+  it('derives stable UUIDs', () => {
+    expect(stableUuid('telegram:1:2')).toBe(stableUuid('telegram:1:2'));
+    expect(stableUuid('telegram:1:2')).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-5[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/);
+  });
+});
+
+describe('voice PIN parsing', () => {
+  it('reads PINs said in many ways', () => {
+    expect(pinAttempt('4719')).toBe('4719');
+    expect(pinAttempt('My PIN is 4 7 1 9.')).toBe('4719');
+    expect(pinAttempt('four seven one nine')).toBe('4719');
+    expect(pinAttempt('forty-seven nineteen')).toBe('4719');
+    expect(pinAttempt('four oh one nine')).toBe('4019');
+    expect(pinAttempt('double four one nine')).toBe('4419');
+    expect(pinAttempt('Oh, um, it’s 4719')).toBe('4719');
+  });
+  it('ignores sentences that merely contain numbers', () => {
+    expect(pinAttempt('my flight is 1234')).toBeNull();
+    expect(pinAttempt('call me at 5')).toBeNull();
+    expect(pinAttempt('what is on today')).toBeNull();
+    expect(pinAttempt('12')).toBeNull();
+    expect(pinAttempt('4719 4720 4721')).toBeNull(); // several guesses in one breath aren't a PIN
+  });
+});
+
+describe('sign-in redirects', () => {
+  it('only continues to our own pages', () => {
+    expect(safeNext('/app/memory')).toBe('/app/memory');
+    expect(safeNext('/oauth/google/connect')).toBe('/oauth/google/connect');
+    for (const bad of ['https://evil.example/', '//evil.example', '/\\evil.example', '/\t/evil.example', '/%09/evil.example', '/app/../../x', 'javascript:alert(1)', '/webhooks/stripe', undefined, 42]) {
+      expect(safeNext(bad)).toBe('/app');
+    }
+  });
+});
+
+describe('cron frequency', () => {
+  it('finds the shortest gap between runs', () => {
+    expect(minCronGapMinutes('0 9 * * *', 'Europe/Berlin')).toBe(24 * 60);
+    expect(minCronGapMinutes('*/5 * * * *', 'UTC')).toBe(5);
+    expect(minCronGapMinutes('0,5 9 * * *', 'UTC')).toBe(5);
+  });
+});
+
+describe('telegram webhook secret', () => {
+  it('is derived from APP_SECRET when not set, in Telegram’s allowed alphabet', () => {
+    const c = loadConfig({ APP_SECRET: 'x'.repeat(40) } as NodeJS.ProcessEnv);
+    expect(c.telegram.webhookSecret).toMatch(/^[A-Za-z0-9_-]{20,256}$/);
+    expect(loadConfig({ APP_SECRET: 'y'.repeat(40) } as NodeJS.ProcessEnv).telegram.webhookSecret).not.toBe(c.telegram.webhookSecret);
+    expect(loadConfig({ APP_SECRET: 'x'.repeat(40), TELEGRAM_WEBHOOK_SECRET: 'mine' } as NodeJS.ProcessEnv).telegram.webhookSecret).toBe('mine');
   });
 });

@@ -248,23 +248,82 @@ describe('scheduler', () => {
 });
 
 describe('voice', () => {
-  it('answers a known caller without email tools and texts approvals', async () => {
+  async function voiceApp() {
     const { voiceCompletions } = await import('../src/voice/llm.js');
     const { Hono } = await import('hono');
-    const user = await makeUser({ phone: '+4915100000060' });
-    const { calls } = scriptedModel([{ text: 'You have two meetings today.' }]);
     const app = new Hono();
     app.post('/v', (c) => voiceCompletions(c));
-    const res = await app.request('/v', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ model: 'tarka-assistant', messages: [{ role: 'system', content: 'x' }, { role: 'user', content: "what's on today?" }], extra_metadata: { telnyx_end_user_target: '+4915100000060' } }),
-    });
-    const body = (await res.json()) as { choices: { message: { content: string } }[] };
-    expect(body.choices[0]!.message.content).toBe('You have two meetings today.');
+    return async (utterances: string[], meta: Record<string, unknown>) => {
+      const msgs = [{ role: 'system', content: 'x' }];
+      for (const u of utterances) msgs.push({ role: 'user', content: u }, { role: 'assistant', content: 'ok' });
+      msgs.pop();
+      const res = await app.request('/v', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ model: 'tarka-assistant', messages: msgs, extra_metadata: meta }) });
+      return ((await res.json()) as { choices: { message: { content: string } }[] }).choices[0]!.message.content;
+    };
+  }
+
+  it('gives an unverified caller a restricted assistant and stores nothing', async () => {
+    const call = await voiceApp();
+    const user = await makeUser({ phone: '+4915100000060' });
+    await users.update(user.id, { profile_summary: 'Priya is allergic to cats and lives at 12 Elm St.' });
+    const { calls } = scriptedModel([{ text: 'I can help with general questions on this call.' }]);
+    const reply = await call(["what's on my calendar today?"], { telnyx_end_user_target: '+4915100000060' });
+    expect(reply).toBe('I can help with general questions on this call.');
+    const prompt = JSON.stringify(calls[0]!.prompt);
+    expect(prompt).toContain('This caller is not verified');
+    expect(prompt).not.toContain('Elm St');
+    expect(prompt).not.toContain('Priya');
+    expect(calls[0]!.tools.every((t) => ['weather', 'web_search'].includes(t))).toBe(true);
+    expect(await messages.recent(user.id)).toHaveLength(0);
+  });
+
+  it('unlocks the full assistant with the voice PIN, checked in code', async () => {
+    const call = await voiceApp();
+    const user = await makeUser({ phone: '+4915100000062' });
+    const { hashPin } = await import('../src/voice/pin.js');
+    await users.updateSettings(user.id, { voicePin: hashPin(user.id, '4719') });
+    const meta = { telnyx_end_user_target: '+4915100000062' };
+
+    const { calls } = scriptedModel([{ text: 'You have two meetings today.' }]);
+    const verified = await call(['hi', 'my pin is four seven one nine'], meta);
+    expect(verified).toMatch(/verified/);
+    expect(calls).toHaveLength(0); // the PIN never reaches the model
+
+    const reply = await call(['hi', 'my pin is four seven one nine', "what's on today?"], meta);
+    expect(reply).toBe('You have two meetings today.');
+    expect(JSON.stringify(calls[0]!.prompt)).not.toContain('not verified');
     expect(calls[0]!.tools.some((t) => t.startsWith('email_'))).toBe(false);
     const rows = await messages.recent(user.id);
-    expect(rows.map((r) => r.channel)).toEqual(['voice', 'voice']);
+    expect(rows.map((r) => r.content)).toEqual(["what's on today?", 'You have two meetings today.']);
+    expect(JSON.stringify(rows)).not.toContain('seven');
+  });
+
+  it('limits PIN guesses per call and per day, and tells the account holder', async () => {
+    const call = await voiceApp();
+    const user = await makeUser({ phone: '+4915100000063' });
+    const { hashPin } = await import('../src/voice/pin.js');
+    await users.updateSettings(user.id, { voicePin: hashPin(user.id, '4719') });
+    const meta = { telnyx_end_user_target: '+4915100000063' };
+    scriptedModel([{ text: 'model' }]);
+    expect(await call(['1111'], meta)).toMatch(/didn't match/);
+    expect(await call(['1111', '2222', '3333'], meta)).toMatch(/can't take more/);
+    expect(await call(['1111', '2222', '3333', '4719'], meta)).toMatch(/can't take more/); // right PIN, but this call is used up
+    // A second call: two more distinct wrong guesses reach the daily limit.
+    await call(['5555'], meta);
+    expect(await call(['5555', '6666'], meta)).toMatch(/can't take more/);
+    expect(sent.at(-1)!.msg.text).toMatch(/wrong voice PINs/);
+    expect(await call(['4719'], meta)).toMatch(/can't take more/); // locked for the day even with the right PIN
+  });
+
+  it('trusts a carrier-verified number unless the user always wants the PIN', async () => {
+    const call = await voiceApp();
+    const user = await makeUser({ phone: '+4915100000064' });
+    const { calls } = scriptedModel([{ text: 'Two meetings.' }]);
+    await call(['what is on today?'], { telnyx_end_user_target: '+4915100000064', telnyx_shaken_stir_attestation: 'A' });
+    expect(JSON.stringify(calls[0]!.prompt)).not.toContain('not verified');
+    await users.updateSettings(user.id, { voiceRequirePin: true });
+    await call(['what is on today?'], { telnyx_end_user_target: '+4915100000064', telnyx_shaken_stir_attestation: 'A' });
+    expect(JSON.stringify(calls[1]!.prompt)).toContain('not verified');
   });
 
   it('runs the concierge persona for outbound calls and keeps the transcript', async () => {
@@ -288,5 +347,262 @@ describe('voice', () => {
     expect(calls[0]!.tools).toContain('hangup');
     const updated = await callsRepo.get(call.id);
     expect(updated!.transcript).toContain('Business: Café Luna, how can I help?');
+  });
+
+  it('refuses a concierge call that is finished or to another number', async () => {
+    const { voiceCompletions } = await import('../src/voice/llm.js');
+    const { calls: callsRepo } = await import('../src/db/repo.js');
+    const { Hono } = await import('hono');
+    const user = await makeUser({ phone: '+4915100000065' });
+    const done = await callsRepo.create(user.id, { direction: 'outbound', to: '+4930123456', objective: 'x', status: 'reported' });
+    const live = await callsRepo.create(user.id, { direction: 'outbound', to: '+4930123456', objective: 'x', status: 'scheduled' });
+    const { calls } = scriptedModel([{ text: 'should not run' }]);
+    const app = new Hono();
+    app.post('/v', (c) => voiceCompletions(c));
+    for (const [id, target] of [[done.id, '+4930123456'], [live.id, '+4930999999']] as const) {
+      const res = await app.request('/v', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ messages: [{ role: 'user', content: 'hello?' }], extra_metadata: { ta_call_id: id, telnyx_end_user_target: target } }) });
+      expect(JSON.stringify(await res.json())).toContain('wrong number');
+    }
+    expect(calls).toHaveLength(0);
+  });
+});
+
+describe('approval replies are strict', () => {
+  const realFetch = globalThis.fetch;
+  let gmailSends = 0;
+
+  beforeAll(() => {
+    setConfig(loadConfig({ ...process.env, GOOGLE_CLIENT_ID: 'id', GOOGLE_CLIENT_SECRET: 'secret' }));
+    vi.stubGlobal('fetch', async (url: string | URL, init?: RequestInit) => {
+      if (String(url).startsWith('https://gmail.googleapis.com/gmail/v1/users/me/messages/send')) {
+        gmailSends++;
+        return new Response(JSON.stringify({ id: 'sent1', threadId: 't1' }), { status: 200 });
+      }
+      return realFetch(url as string, init);
+    });
+  });
+  afterAll(() => {
+    vi.unstubAllGlobals();
+    setConfig(loadConfig());
+  });
+  beforeEach(() => {
+    gmailSends = 0;
+  });
+
+  async function withDraft(phone: string, body = 'Hi Sam, deck attached.') {
+    const user = await makeUser({ phone });
+    await integrations.upsert(user.id, 'google', { account: 'p@example.com', scopes: [], accessTokenEnc: encrypt('t'), refreshTokenEnc: encrypt('r'), expiresAt: new Date(Date.now() + 3600_000) });
+    scriptedModel([{ toolCalls: [{ name: 'email_send', input: { to: ['sam@example.com'], subject: 'Deck', body } }] }, { text: 'I drafted it.' }]);
+    await handleInbound(sms(phone, 'email sam the deck'));
+    return user;
+  }
+
+  it('shows the code-written request under the reply, whatever the model said', async () => {
+    await withDraft('+4915100000070');
+    const text = sent.at(-1)!.msg.text;
+    expect(text).toMatch(/^I drafted it\.\n\nNeeds your OK:\nSend email to sam@example\.com — “Deck”:\nHi Sam, deck attached\.\nReply YES/);
+  });
+
+  it('does not treat a sentence that starts with yes as approval', async () => {
+    const user = await withDraft('+4915100000071');
+    const { calls } = scriptedModel([{ text: 'Great, Tuesday it is.' }]);
+    await handleInbound(sms('+4915100000071', "Yes I'm free Tuesday"));
+    expect(calls).toHaveLength(1);
+    expect(gmailSends).toBe(0);
+    expect(await approvals.pending(user.id)).toHaveLength(1);
+  });
+
+  it('ignores the phrases that used to slip through', async () => {
+    // From the security review: each of these executed a pending email before.
+    for (const [i, reply] of ['ok, cancel that', 'please do not send it', 'call mom', 'Send me the weather', 'yes?'].entries()) {
+      const user = await withDraft(`+491510000007${5 + i}`);
+      scriptedModel([{ text: 'Got it.' }]);
+      await handleInbound(sms(`+491510000007${5 + i}`, reply));
+      expect([reply, gmailSends]).toEqual([reply, 0]);
+      expect(await approvals.pending(user.id)).toHaveLength(1);
+    }
+  });
+
+  it('only takes a bare yes for the request in the newest message', async () => {
+    const user = await withDraft('+4915100000072');
+    // Something else arrives in between (a reminder); "ok" now answers that, not the email.
+    await messages.add(user.id, 'assistant', 'sms', '⏰ Reminder: bins', { source: 'reminder' });
+    const { calls } = scriptedModel([{ text: 'Noted.' }]);
+    await handleInbound(sms('+4915100000072', 'ok'));
+    expect(calls).toHaveLength(1);
+    expect(gmailSends).toBe(0);
+    // With the code it's unambiguous at any time.
+    const [a] = await approvals.pending(user.id);
+    clearModel();
+    const r = await handleInbound(sms('+4915100000072', `yes ${a!.short_code.toLowerCase()}`));
+    expect(gmailSends).toBe(1);
+    expect(r.reply).toMatch(/^Done/);
+  });
+
+  it('accepts emoji and polite variants as a whole-message yes', async () => {
+    for (const [i, reply] of ['👍', 'Yes please!', 'ok, send it', 'yep go ahead'].entries()) {
+      gmailSends = 0;
+      await withDraft(`+491510000008${i}`);
+      clearModel();
+      await handleInbound(sms(`+491510000008${i}`, reply));
+      expect([reply, gmailSends]).toEqual([reply, 1]);
+    }
+  });
+
+  it('asks which one when a yes could mean several, and "yes all" approves them', async () => {
+    const user = await makeUser({ phone: '+4915100000090' });
+    await integrations.upsert(user.id, 'google', { account: 'p@example.com', scopes: [], accessTokenEnc: encrypt('t'), refreshTokenEnc: encrypt('r'), expiresAt: new Date(Date.now() + 3600_000) });
+    scriptedModel([
+      {
+        toolCalls: [
+          { name: 'email_send', input: { to: ['a@example.com'], subject: 'A', body: 'a' } },
+          { name: 'schedule_task', input: { title: 'Weekly plan', instructions: 'Summarise my week ahead', when: 'monday 8am', repeat: 'weekly' } },
+        ],
+      },
+      { text: 'Two things need your OK.' },
+    ]);
+    await handleInbound(sms('+4915100000090', 'email a and set up my weekly plan'));
+    expect(sent.at(-1)!.msg.text).toContain('These need your OK');
+    clearModel();
+    const which = await handleInbound(sms('+4915100000090', 'yes'));
+    expect(which.reply).toContain('Which one?');
+    expect(gmailSends).toBe(0);
+    await handleInbound(sms('+4915100000090', 'yes all'));
+    expect(gmailSends).toBe(1);
+    expect((await routines.byKind(user.id, 'task')).map((r) => r.title)).toEqual(['Weekly plan']);
+  });
+});
+
+describe('scheduling limits', () => {
+  it('rejects reminders that repeat too often', async () => {
+    const user = await makeUser({ phone: '+4915100000100' });
+    const { calls } = scriptedModel([{ toolCalls: [{ name: 'schedule_reminder', input: { text: 'drink water', when: 'in 5 minutes', repeat: '*/5 * * * *' } }] }, { text: 'How about hourly?' }]);
+    await handleInbound(sms('+4915100000100', 'remind me every 5 minutes to drink water'));
+    expect(JSON.stringify(calls[1]!.prompt)).toContain('repeat at most every 15 minutes');
+    expect(await routines.byKind(user.id, 'reminder')).toHaveLength(0);
+  });
+
+  it('needs approval for a repeating task, not for a one-off', async () => {
+    const user = await makeUser({ phone: '+4915100000101' });
+    scriptedModel([{ toolCalls: [{ name: 'schedule_task', input: { title: 'Price check', instructions: 'Check the price of the Sony XM6 and tell me', when: 'tomorrow 9am' } }] }, { text: 'Will do.' }]);
+    await handleInbound(sms('+4915100000101', 'check the price tomorrow'));
+    expect(await routines.byKind(user.id, 'task')).toHaveLength(1);
+    scriptedModel([{ toolCalls: [{ name: 'schedule_task', input: { title: 'Inbox digest', instructions: 'Summarise my inbox', when: 'tomorrow 8am', repeat: 'daily' } }] }, { text: 'Set up?' }]);
+    await handleInbound(sms('+4915100000101', 'every day summarise my inbox'));
+    expect(await routines.byKind(user.id, 'task')).toHaveLength(1);
+    const [a] = await approvals.pending(user.id);
+    expect(a!.summary).toMatch(/^Set up a repeating task “Inbox digest”, every day at 8:00 AM/);
+  });
+
+  it('caps how many scheduled items one person can have', async () => {
+    setConfig(loadConfig({ ...process.env, MAX_SCHEDULED_ITEMS: '2' }));
+    try {
+      const user = await makeUser({ phone: '+4915100000102' });
+      for (const t of ['a', 'b', 'c']) {
+        scriptedModel([{ toolCalls: [{ name: 'schedule_reminder', input: { text: t, when: 'tomorrow 9am' } }] }, { text: 'ok' }]);
+        await handleInbound(sms('+4915100000102', `remind me ${t}`));
+      }
+      expect(await routines.byKind(user.id, 'reminder')).toHaveLength(2);
+    } finally {
+      setConfig(loadConfig());
+    }
+  });
+
+  it('stops running tasks after the daily limit', async () => {
+    setConfig(loadConfig({ ...process.env, MAX_TASK_RUNS_PER_DAY: '1' }));
+    try {
+      const user = await makeUser({ phone: '+4915100000103' });
+      const r = await routines.create(user.id, { kind: 'task', title: 'Check', instructions: 'check', scheduleType: 'cron', cron: '0 * * * *', timezone: 'Europe/Berlin', nextRunAt: new Date() });
+      const { calls } = scriptedModel([{ text: 'Checked.' }]);
+      await runRoutine(r.id, user.id);
+      await runRoutine(r.id, user.id);
+      await runRoutine(r.id, user.id);
+      expect(calls).toHaveLength(1);
+      expect(sent.filter((s) => /daily limit/.test(s.msg.text))).toHaveLength(1);
+    } finally {
+      setConfig(loadConfig());
+    }
+  });
+});
+
+describe('accounts and channels', () => {
+  it('keeps "stop" as a normal word outside SMS and WhatsApp', async () => {
+    const user = await makeUser({ phone: '+4915100000110', channel: 'telegram' });
+    await identities.create(user.id, 'telegram', '555', null, true);
+    const { calls } = scriptedModel([{ text: 'Stopped the timer.' }]);
+    await handleInbound({ channel: 'telegram', externalId: '555', text: 'stop', receivedAt: new Date().toISOString() });
+    expect(calls).toHaveLength(1);
+    expect((await identities.find('telegram', '555'))!.opted_out_at).toBeNull();
+  });
+
+  it('never moves a channel address from one account to another', async () => {
+    const owner = await makeUser({ phone: '+4915100000111' });
+    await identities.create(owner.id, 'telegram', '777', null, true);
+    const other = await makeUser({ phone: '+4915100000112' });
+    const { auth } = await import('../src/db/repo.js');
+    const code = await auth.createLinkCode(other.id);
+    await handleInbound({ channel: 'telegram', externalId: '777', text: '', command: { name: 'start', arg: code }, receivedAt: new Date().toISOString() });
+    expect((await identities.find('telegram', '777'))!.user_id).toBe(owner.id);
+    expect(sent.at(-1)!.msg.text).toMatch(/already connected to another/);
+  });
+
+  it('fires reminders for someone still onboarding', async () => {
+    const user = await makeUser({ phone: '+4915100000113', status: 'onboarding' });
+    const r = await routines.create(user.id, { kind: 'reminder', title: 'Pick up keys', scheduleType: 'once', runAt: new Date(), timezone: 'Europe/Berlin', nextRunAt: new Date() });
+    await runRoutine(r.id, user.id);
+    expect(sent.at(-1)!.msg.text).toBe('⏰ Reminder: Pick up keys');
+  });
+
+  it('keeps a paused brief paused when settings change', async () => {
+    const { syncSystemRoutines } = await import('../src/proactive/system-routines.js');
+    const user = await makeUser({ phone: '+4915100000114' });
+    await syncSystemRoutines(user);
+    const [brief] = await routines.byKind(user.id, 'brief');
+    await routines.setStatus(user.id, brief!.id, 'paused');
+    await syncSystemRoutines((await users.updateSettings(user.id, { briefTime: '08:15' }))!);
+    const [after] = await routines.byKind(user.id, 'brief');
+    expect(after).toMatchObject({ status: 'paused', cron: '15 8 * * *' });
+  });
+
+  it('removes the exact list item, not every item containing the word', async () => {
+    const user = await makeUser({ phone: '+4915100000115' });
+    await lists.add(user.id, 'groceries', ['milk', 'oat milk', 'milk chocolate', 'bread']);
+    expect(await lists.remove(user.id, 'groceries', ['milk'])).toEqual(['milk']);
+    expect(await lists.remove(user.id, 'groceries', ['milk'])).toEqual([]); // now ambiguous: nothing removed
+    expect(await lists.remove(user.id, 'groceries', ['bre'])).toEqual(['bread']);
+    expect((await lists.items(user.id, 'groceries')).map((i) => i.text)).toEqual(['oat milk', 'milk chocolate']);
+  });
+
+  it('does not retry on the fallback model once a tool has run', async () => {
+    setConfig(loadConfig({ ...process.env, FALLBACK_MODEL: 'kimi-k3' }));
+    try {
+      const user = await makeUser({ phone: '+4915100000116' });
+      const { MockLanguageModelV4 } = await import('ai/test');
+      const { setModelOverride } = await import('../src/models/tarka.js');
+      let n = 0;
+      setModelOverride(() =>
+        new MockLanguageModelV4({
+          doGenerate: async () => {
+            n++;
+            if (n === 1) {
+              return {
+                content: [{ type: 'tool-call', toolCallId: 'c1', toolName: 'schedule_reminder', input: JSON.stringify({ text: 'Call Mum', when: 'tomorrow 6pm' }) }],
+                finishReason: { unified: 'tool-calls', raw: undefined },
+                usage: { inputTokens: { total: 1, noCache: 1, cacheRead: 0, cacheWrite: undefined }, outputTokens: { total: 1, text: 1, reasoning: undefined } },
+                warnings: [],
+              };
+            }
+            throw new Error('provider down');
+          },
+        }),
+      );
+      const r = await handleInbound(sms('+4915100000116', 'remind me to call mum tomorrow at 6'));
+      expect(r.reply).toMatch(/something went wrong/);
+      expect(n).toBeLessThanOrEqual(4); // primary with its retries, never a second full turn
+      expect(await routines.byKind(user.id, 'reminder')).toHaveLength(1);
+    } finally {
+      setConfig(loadConfig());
+      clearModel();
+    }
   });
 });

@@ -38,15 +38,28 @@ export function defineTool<I>(spec: ToolSpec<I>): ToolSpec<I> {
 export type ApprovalRequester = (spec: ToolSpec, input: unknown, summary: string, ctx: ToolContext) => Promise<Record<string, unknown>>;
 
 /**
- * Caller ID can be spoofed, so a phone call never gets tools that read email or documents, and it
- * can't forget memories or hand out sign-in links.
+ * Even a verified call never gets tools that read email or documents aloud, forget memories or
+ * hand out sign-in links: those stay on text channels.
  */
 const VOICE_BLOCKED = /^(email_|drive_|memory_forget$|dashboard_link$|connect_google_link$|upgrade_link$)/;
 
+/**
+ * All an unverified caller can use: nothing that reads or writes the account holder's data. (Not
+ * even reminders: a faked call could plant a "reminder" that arrives from the user's own assistant.)
+ */
+export const UNVERIFIED_VOICE_TOOLS = ['weather', 'web_search'];
+
 /** Converts our specs to AI SDK tools, routing approval-gated calls through `requestApproval`. */
-export function toAiTools(specs: ToolSpec[], ctx: ToolContext, requestApproval: ApprovalRequester, onCall?: (name: string, input: unknown) => void): ToolSet {
+export function toAiTools(
+  specs: ToolSpec[],
+  ctx: ToolContext,
+  requestApproval: ApprovalRequester,
+  onCall?: (name: string, input: unknown) => void,
+  only?: string[],
+): ToolSet {
   const out: ToolSet = {};
   for (const spec of specs) {
+    if (only && !only.includes(spec.name)) continue;
     if (spec.available && !spec.available(ctx)) continue;
     if (ctx.channel === 'voice' && VOICE_BLOCKED.test(spec.name)) continue;
     out[spec.name] = tool({

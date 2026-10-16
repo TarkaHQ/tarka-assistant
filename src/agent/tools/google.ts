@@ -257,12 +257,13 @@ export const googleTools: ToolSpec[] = [
     input: z.object({
       to: emailList.min(1),
       cc: emailList.optional(),
-      subject: z.string(),
-      body: z.string().min(1),
+      subject: z.string().max(300),
+      body: z.string().min(1).max(20_000),
       reply_to_id: z.string().optional(),
     }),
     available: isConnected,
-    approval: (i) => `Send email to ${i.to.join(', ')}${i.cc?.length ? ` (cc ${i.cc.join(', ')})` : ''} — “${i.subject}”:\n${i.body.slice(0, 600)}${i.body.length > 600 ? '…' : ''}`,
+    // The whole body: the user approves exactly what goes out (channels shorten it for display).
+    approval: (i) => `Send email to ${i.to.join(', ')}${i.cc?.length ? ` (cc ${i.cc.join(', ')})` : ''}${i.reply_to_id ? ' as a reply' : ''} — “${i.subject}”:\n${i.body}`,
     run: async (i, ctx) => {
       const g = await Google.forUser(ctx.user.id);
       const reply = i.reply_to_id ? await g.readMail(i.reply_to_id) : null;

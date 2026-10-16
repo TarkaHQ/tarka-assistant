@@ -80,6 +80,23 @@ export function nextCronRun(cron: string, tz: string, after = new Date()): Date 
   }
 }
 
+/** The shortest gap, in minutes, between upcoming runs of a cron (sampled over its next runs). */
+export function minCronGapMinutes(cron: string, tz: string, samples = 24, from = new Date()): number {
+  try {
+    const expr = CronExpressionParser.parse(cron, { currentDate: from, tz: safeZone(tz) });
+    let prev = expr.next().toDate().getTime();
+    let min = Number.POSITIVE_INFINITY;
+    for (let i = 0; i < samples; i++) {
+      const t = expr.next().toDate().getTime();
+      min = Math.min(min, (t - prev) / 60_000);
+      prev = t;
+    }
+    return min;
+  } catch {
+    return 0;
+  }
+}
+
 export function isValidCron(cron: string): boolean {
   const fields = cron.trim().split(/\s+/);
   if (fields.length !== 5) return false;

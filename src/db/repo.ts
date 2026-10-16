@@ -12,7 +12,7 @@ import type {
   User,
   UserSettings,
 } from './types.js';
-import { shortCode, sha256 } from '../util/crypto.js';
+import { APPROVAL_CODE_ALPHABET, shortCode, sha256 } from '../util/crypto.js';
 
 type Json = Parameters<ReturnType<typeof db>['json']>[0];
 const j = (v: unknown) => db().json(v as Json);
@@ -98,6 +98,12 @@ export const users = {
 // Identities (one per channel address)
 // ---------------------------------------------------------------------------------------------
 
+export class IdentityTaken extends Error {
+  constructor(public channel: ChannelName) {
+    super(`This ${channel} address is already connected to another account`);
+  }
+}
+
 export const identities = {
   async find(channel: ChannelName, externalId: string): Promise<Identity | null> {
     const [row] = await db()<Identity[]>`
@@ -105,14 +111,20 @@ export const identities = {
     return row ?? null;
   },
 
+  /**
+   * Attaches a channel address to a user. An address that already belongs to someone else is never
+   * moved (that would hand their conversation to another account): it throws IdentityTaken.
+   */
   async create(userId: string, channel: ChannelName, externalId: string, display?: string | null, verified = true): Promise<Identity> {
     const [row] = await db()<Identity[]>`
       insert into identities (user_id, channel, external_id, display, verified_at)
       values (${userId}, ${channel}, ${externalId}, ${display ?? null}, ${verified ? new Date() : null})
-      on conflict (channel, external_id) do update set user_id = excluded.user_id, display = coalesce(excluded.display, identities.display),
-        verified_at = coalesce(identities.verified_at, excluded.verified_at), opted_out_at = null
+      on conflict (channel, external_id) do update set display = coalesce(excluded.display, identities.display),
+        verified_at = coalesce(identities.verified_at, excluded.verified_at)
+      where identities.user_id = excluded.user_id
       returning *`;
-    return row!;
+    if (!row) throw new IdentityTaken(channel);
+    return row;
   },
 
   async forUser(userId: string): Promise<Identity[]> {
@@ -165,6 +177,13 @@ export const messages = {
     return row?.n ?? 0;
   },
 
+  /** The newest assistant-written message (what the user is most likely replying to). */
+  async lastAssistant(userId: string): Promise<MessageRow | null> {
+    const [row] = await db()<MessageRow[]>`
+      select * from messages where user_id = ${userId} and role = 'assistant' order by id desc limit 1`;
+    return row ?? null;
+  },
+
   async proactiveCountSince(userId: string, since: Date): Promise<number> {
     const [row] = await db()<{ n: number }[]>`
       select count(*)::int as n from messages where user_id = ${userId} and created_at >= ${since}
@@ -211,6 +230,13 @@ export const routines = {
       select * from routines where user_id = ${userId}
       and (${includeInactive} or status in ('active', 'paused'))
       order by coalesce(next_run_at, created_at)`;
+  },
+
+  /** Active or paused items the user (or the agent) created: what the per-user cap counts. */
+  async countOwn(userId: string): Promise<number> {
+    const [row] = await db()<{ n: number }[]>`
+      select count(*)::int as n from routines where user_id = ${userId} and created_by <> 'system' and status in ('active', 'paused')`;
+    return row?.n ?? 0;
   },
 
   async byKind(userId: string, kind: RoutineKind): Promise<Routine[]> {
@@ -269,7 +295,7 @@ export const approvals = {
     const sql = db();
     // Short codes are unique among the user's pending approvals.
     for (let attempt = 0; attempt < 5; attempt++) {
-      const code = shortCode(4);
+      const code = shortCode(4, APPROVAL_CODE_ALPHABET);
       const [clash] = await sql`select 1 from approvals where user_id = ${userId} and status = 'pending' and short_code = ${code}`;
       if (clash) continue;
       const [row] = await sql<Approval[]>`
@@ -463,16 +489,24 @@ export const lists = {
     return fresh.length;
   },
 
-  /** Removes (or ticks off) items matching case-insensitively. Returns the texts affected. */
+  /**
+   * Removes (or ticks off) items, case-insensitively. An exact match wins; otherwise a partial match
+   * counts only when it is the only one ("milk" never takes "oat milk" and "milk chocolate" too).
+   */
   async remove(userId: string, name: string, items: string[], tick = false): Promise<string[]> {
     const wanted = items.map((s) => s.trim().toLowerCase()).filter(Boolean);
-    const current = await lists.items(userId, name);
-    const hits = current.filter((i) => wanted.some((w) => i.text.toLowerCase() === w || i.text.toLowerCase().includes(w)));
-    if (hits.length === 0) return [];
-    const ids = hits.map((h) => h.id);
+    const current = (await lists.items(userId, name)).filter((i) => !tick || !i.done);
+    const hits = new Map<string, { id: string; text: string }>();
+    for (const w of wanted) {
+      const exact = current.filter((i) => i.text.toLowerCase() === w);
+      const partial = exact.length ? [] : current.filter((i) => i.text.toLowerCase().includes(w));
+      for (const h of exact.length ? exact : partial.length === 1 ? partial : []) hits.set(h.id, h);
+    }
+    if (hits.size === 0) return [];
+    const ids = [...hits.keys()];
     if (tick) await db()`update list_items set done = true where id in ${db()(ids)}`;
     else await db()`delete from list_items where id in ${db()(ids)}`;
-    return hits.map((h) => h.text);
+    return [...hits.values()].map((h) => h.text);
   },
 
   async clear(userId: string, name: string): Promise<void> {
@@ -489,6 +523,13 @@ export const auth = {
     await db()`
       insert into login_tokens (token_hash, email, user_id, purpose, expires_at)
       values (${sha256(token)}, ${email.toLowerCase()}, ${userId}, 'login', now() + make_interval(mins => ${ttlMinutes}))`;
+  },
+
+  /** Checks a sign-in link without using it up (link previews and scanners only GET pages). */
+  async peekLoginToken(token: string): Promise<{ email: string | null; user_id: string | null } | null> {
+    const [row] = await db()<{ email: string | null; user_id: string | null }[]>`
+      select email, user_id from login_tokens where token_hash = ${sha256(token)} and used_at is null and expires_at > now()`;
+    return row ?? null;
   },
 
   async consumeLoginToken(token: string): Promise<{ email: string | null; user_id: string | null } | null> {
@@ -597,5 +638,13 @@ export const kv = {
   },
   async set(key: string, value: unknown): Promise<void> {
     await db()`insert into kv (key, value) values (${key}, ${j(value)}) on conflict (key) do update set value = excluded.value, updated_at = now()`;
+  },
+  /** Atomic counter; returns the new value. */
+  async incr(key: string, by = 1): Promise<number> {
+    const [row] = await db()<{ n: number }[]>`
+      insert into kv (key, value) values (${key}, to_jsonb(${by}::int))
+      on conflict (key) do update set value = to_jsonb(coalesce((kv.value #>> '{}')::int, 0) + ${by}::int), updated_at = now()
+      returning (value #>> '{}')::int as n`;
+    return row?.n ?? by;
   },
 };

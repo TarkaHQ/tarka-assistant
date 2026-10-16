@@ -140,6 +140,32 @@ export const LoginSent: FC<{ email: string; devLink?: string | null }> = ({ emai
   </Layout>
 );
 
+/**
+ * Sign-in links open this page; the button (a POST) uses up the link. Link previews and mail
+ * scanners only fetch pages, so they can't spend it, and the page says which account it is for.
+ */
+export const SignInConfirm: FC<{ token: string; next: string; account: string; connectGoogle: boolean; startUrl?: string }> = ({ token, next, account, connectGoogle, startUrl }) => (
+  <Layout title="Sign in" ridge>
+    <header class="shell" style="padding-top:22px">
+      <Logo />
+    </header>
+    <main class="shell auth">
+      <h1>{connectGoogle ? 'Connect Google' : 'Sign in'}</h1>
+      <p>
+        {connectGoogle ? 'You’re connecting Google to the assistant account of ' : 'You’re signing in as '}
+        <strong>{account}</strong>.
+      </p>
+      {connectGoogle ? <p class="hint">Only continue if this is your account. Google will ask which of your Google accounts to use.</p> : null}
+      <form method="post" action={startUrl ?? `/auth/${encodeURIComponent(token)}`}>
+        <input type="hidden" name="next" value={next} />
+        <button class="btn" type="submit">
+          {connectGoogle ? 'Continue to Google' : 'Sign in'}
+        </button>
+      </form>
+    </main>
+  </Layout>
+);
+
 export const SimpleMessage: FC<{ title: string; body: string; href?: string; cta?: string }> = ({ title, body, href, cta }) => (
   <Layout title={title} ridge>
     <header class="shell" style="padding-top:22px">

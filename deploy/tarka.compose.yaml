@@ -40,6 +40,11 @@ x-tarka:
       description: Letters and digits only.
       secret: true
       required: true
+    - name: HINDSIGHT_API_KEY
+      label: Memory service key
+      description: 32+ random characters. Only the app may read or write memories.
+      secret: true
+      required: true
     - name: SIGNUP_MODE
       label: Sign-ups (open, invite or closed)
       default_value: invite
@@ -47,7 +52,7 @@ x-tarka:
       label: Telegram bot token
       secret: true
     - name: TELEGRAM_WEBHOOK_SECRET
-      label: Telegram webhook secret
+      label: Telegram webhook secret (optional; derived from the app secret if empty)
       secret: true
     - name: TELNYX_API_KEY
       label: Telnyx API key
@@ -60,6 +65,8 @@ x-tarka:
       label: Telnyx phone number (E.164)
     - name: TELNYX_WHATSAPP_NUMBER
       label: WhatsApp number (E.164)
+    - name: TELNYX_VOICE_ASSISTANT_ID
+      label: Telnyx assistant that answers calls
     - name: TELNYX_CONCIERGE_ASSISTANT_ID
       label: Telnyx assistant for outbound calls
     - name: VOICE_LLM_SECRET
@@ -104,6 +111,7 @@ services:
       APP_SECRET: ${APP_SECRET}
       DATABASE_URL: postgres://assistant:${POSTGRES_PASSWORD}@db:5432/assistant
       HINDSIGHT_URL: http://hindsight:8888
+      HINDSIGHT_API_KEY: ${HINDSIGHT_API_KEY}
       TARKA_BASE_URL: http://tarka/v1
       SIGNUP_MODE: ${SIGNUP_MODE}
       TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN}
@@ -113,6 +121,7 @@ services:
       TELNYX_MESSAGING_PROFILE_ID: ${TELNYX_MESSAGING_PROFILE_ID}
       TELNYX_PHONE_NUMBER: ${TELNYX_PHONE_NUMBER}
       TELNYX_WHATSAPP_NUMBER: ${TELNYX_WHATSAPP_NUMBER}
+      TELNYX_VOICE_ASSISTANT_ID: ${TELNYX_VOICE_ASSISTANT_ID}
       TELNYX_CONCIERGE_ASSISTANT_ID: ${TELNYX_CONCIERGE_ASSISTANT_ID}
       VOICE_LLM_SECRET: ${VOICE_LLM_SECRET}
       GOOGLE_CLIENT_ID: ${GOOGLE_CLIENT_ID}
@@ -164,6 +173,10 @@ services:
       # Same database as the app, in its own schema.
       HINDSIGHT_API_DATABASE_URL: postgresql://assistant:${POSTGRES_PASSWORD}@db:5432/assistant
       HINDSIGHT_API_DATABASE_SCHEMA: hindsight
+      # Every API call needs the key (the health check doesn't), so nothing else in the stack,
+      # nor a page the assistant is tricked into fetching, can read the memory banks.
+      HINDSIGHT_API_TENANT_EXTENSION: hindsight_api.extensions.builtin.tenant:ApiKeyTenantExtension
+      HINDSIGHT_API_TENANT_API_KEY: ${HINDSIGHT_API_KEY}
       HINDSIGHT_API_LLM_PROVIDER: openai
       HINDSIGHT_API_LLM_BASE_URL: http://tarka/v1
       HINDSIGHT_API_LLM_API_KEY: tarka-local

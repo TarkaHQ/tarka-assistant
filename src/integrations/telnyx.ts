@@ -82,7 +82,9 @@ export async function downloadMedia(url: string): Promise<Uint8Array> {
   // Inbound MMS media URLs are pre-signed; WhatsApp media may need the API key.
   const key = config().telnyx.apiKey;
   let res = await fetch(url, { signal: AbortSignal.timeout(30_000) });
-  if ((res.status === 401 || res.status === 403) && key) res = await fetch(url, { headers: { Authorization: `Bearer ${key}` }, signal: AbortSignal.timeout(30_000) });
+  // The API key only ever goes to Telnyx's own hosts.
+  const telnyxHost = /(^|\.)telnyx\.com$/i.test(new URL(url).hostname);
+  if ((res.status === 401 || res.status === 403) && key && telnyxHost) res = await fetch(url, { headers: { Authorization: `Bearer ${key}` }, signal: AbortSignal.timeout(30_000) });
   if (!res.ok) throw new Error(`Media download failed (${res.status})`);
   return new Uint8Array(await res.arrayBuffer());
 }

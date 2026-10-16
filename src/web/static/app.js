@@ -286,6 +286,41 @@
     });
   }
 
+  var pinForm = document.getElementById('voice-pin-form');
+  if (pinForm) {
+    var pinStatus = document.getElementById('voice-pin-status');
+    pinForm.addEventListener('submit', function (e) {
+      e.preventDefault();
+      var f = new FormData(pinForm);
+      var body = { voice_require_pin: f.get('voice_require_pin') === 'on' };
+      var pin = String(f.get('voice_pin') || '').trim();
+      if (pin) body.voice_pin = pin;
+      pinStatus.textContent = 'Saving…';
+      api('/api/settings', body)
+        .then(function () {
+          pinStatus.textContent = 'Saved.';
+          pinForm.reset();
+          if (pin) setTimeout(function () { location.reload(); }, 600);
+        })
+        .catch(function (err) {
+          pinStatus.textContent = err.message;
+        });
+    });
+    var removePin = pinForm.querySelector('[data-voice-pin-remove]');
+    if (removePin) {
+      removePin.addEventListener('click', function () {
+        pinStatus.textContent = 'Removing…';
+        api('/api/settings', { voice_pin: '' })
+          .then(function () {
+            location.reload();
+          })
+          .catch(function (err) {
+            pinStatus.textContent = err.message;
+          });
+      });
+    }
+  }
+
   var modelForm = document.getElementById('model-form');
   if (modelForm) {
     modelForm.addEventListener('change', function (e) {

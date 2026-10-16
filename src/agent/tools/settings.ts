@@ -96,7 +96,7 @@ export const settingsTools: ToolSpec[] = [
     available: () => config().google.enabled,
     run: async (_i, ctx) => {
       const existing = await integrations.get(ctx.user.id, 'google');
-      return { url: connectGoogleLink(ctx.user), already_connected: existing?.status === 'active' ? existing.account : null };
+      return { url: await connectGoogleLink(ctx.user), expires_in_minutes: 30, already_connected: existing?.status === 'active' ? existing.account : null };
     },
   }),
 

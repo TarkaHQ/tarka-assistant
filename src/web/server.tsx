@@ -1,4 +1,6 @@
-import { Hono } from 'hono';
+import { Hono, type Context } from 'hono';
+import { deleteCookie, getCookie, setCookie } from 'hono/cookie';
+import { timingSafeEqual } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -20,15 +22,17 @@ import { sendToUser } from '../channels/deliver.js';
 import { authUrl, completeOAuth } from '../integrations/google.js';
 import { verifyTelnyxSignature } from '../integrations/telnyx.js';
 import { sendEmail } from '../integrations/email.js';
-import { checkoutUrl, handleStripeEvent, portalUrl, verifyStripeSignature } from '../billing/stripe.js';
+import { cancelSubscription, checkoutUrl, handleStripeEvent, portalUrl, verifyStripeSignature } from '../billing/stripe.js';
 import { enqueue } from '../jobs/queue.js';
 import { syncSystemRoutines } from '../proactive/system-routines.js';
-import { randomToken, openState, sealState } from '../util/crypto.js';
+import { randomToken, openState, sealState, stableUuid } from '../util/crypto.js';
 import { isValidHHMM, isValidTimezone, nextCronRun, startOfLocalMonth } from '../util/time.js';
 import { voiceCompletions, voiceModels } from '../voice/llm.js';
+import { hashPin, isValidPin, PIN_MAX, PIN_MIN } from '../voice/pin.js';
 import { ActivityPage, HomePage, HoodPage, MemoryPage, SchedulePage, SettingsPage, messageHtml, ApprovalCard, UpcomingList, type ActivityEntry } from './pages/app.js';
-import { Landing, LoginPage, LoginSent, SimpleMessage } from './pages/public.js';
-import { endSession, rateLimited, requireApi, requirePage, startSession, type AppEnv } from './session.js';
+import { Landing, LoginPage, LoginSent, SignInConfirm, SimpleMessage } from './pages/public.js';
+import { currentUser, endSession, rateLimited, requireApi, requirePage, startSession, type AppEnv } from './session.js';
+import { safeNext } from './links.js';
 import { inboundKey } from '../channels/inbound.js';
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -42,7 +46,36 @@ function trialDaysLeft(user: User): number | null {
 /** Webhooks hand messages to the queue so the HTTP response is immediate. */
 export async function enqueueInbound(msg: InboundMessage): Promise<void> {
   const identity = await identities.find(msg.channel, msg.externalId);
-  await enqueue('inbound', msg, { singletonKey: identity ? `user:${identity.user_id}` : inboundKey(msg) });
+  await enqueue('inbound', msg, {
+    singletonKey: identity ? `user:${identity.user_id}` : inboundKey(msg),
+    // Providers retry webhooks; the same message id is only queued once.
+    id: msg.providerMessageId ? stableUuid(`${msg.channel}:${msg.externalId}:${msg.providerMessageId}`) : undefined,
+  });
+}
+
+/** Form posts that change who is signed in must come from our own pages (login CSRF). */
+function sameOrigin(c: Context): boolean {
+  const cfg = config();
+  if (!cfg.isProd) return true;
+  const origin = c.req.header('origin');
+  if (origin) return origin === new URL(cfg.publicUrl).origin;
+  const site = c.req.header('sec-fetch-site');
+  return site === 'same-origin';
+}
+
+function accountLabel(user: User): string {
+  const contact = user.email ?? (user.phone ? `${user.phone.slice(0, 3)}…${user.phone.slice(-4)}` : null);
+  if (user.name && contact) return `${user.name} (${contact})`;
+  return user.name ?? contact ?? 'your account';
+}
+
+const OAUTH_COOKIE = 'ta_oauth';
+
+/** Starts Google OAuth for the signed-in user, bound to this browser by a nonce cookie. */
+function startGoogleOAuth(c: Context, user: User): Response {
+  const nonce = randomToken(16);
+  setCookie(c, OAUTH_COOKIE, nonce, { httpOnly: true, secure: config().isProd, sameSite: 'Lax', path: '/oauth/google', maxAge: 900 });
+  return c.redirect(authUrl(sealState({ uid: user.id, p: 'google', n: nonce }, 900)));
 }
 
 export function createApp(): Hono<AppEnv> {
@@ -93,7 +126,7 @@ export function createApp(): Hono<AppEnv> {
   app.post('/login', async (c) => {
     const form = await c.req.parseBody();
     const email = String(form.email ?? '').trim().toLowerCase();
-    const next = String(form.next ?? '/app');
+    const next = safeNext(form.next);
     const ip = c.req.header('x-forwarded-for')?.split(',')[0]?.trim() ?? 'local';
     if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) return c.html(String(<LoginPage next={next} error="Enter a valid email address." invite={cfg.product.signupMode === 'invite'} />), 400);
     if (rateLimited(`login:${ip}`, 10, 15 * 60_000) || rateLimited(`login:${email}`, 5, 15 * 60_000)) {
@@ -110,7 +143,7 @@ export function createApp(): Hono<AppEnv> {
     }
     const token = randomToken(24);
     await auth.createLoginToken(token, email, user.id, 20);
-    const link = `${cfg.publicUrl}/auth/${token}?next=${encodeURIComponent(next.startsWith('/') ? next : '/app')}`;
+    const link = `${cfg.publicUrl}/auth/${token}${next !== '/app' ? `?next=${encodeURIComponent(next)}` : ''}`;
     const sent = await sendEmail(
       email,
       `Sign in to ${cfg.product.productName}`,
@@ -120,14 +153,32 @@ export function createApp(): Hono<AppEnv> {
     return c.html(String(<LoginSent email={email} devLink={cfg.product.devLogin ? link : null} />));
   });
 
+  const expiredLink = () =>
+    String(<SimpleMessage title="That link has expired" body="Sign-in links work once, for a short time. Ask for a new one." href="/login" cta="Get a new link" />);
+
+  // Opening a sign-in link shows a confirmation; only the button (POST) uses the link up.
   app.get('/auth/:token', async (c) => {
+    const token = c.req.param('token');
+    const row = await auth.peekLoginToken(token);
+    const user = row?.user_id ? await users.get(row.user_id) : null;
+    if (!user || user.status === 'deleted') return c.html(expiredLink(), 400);
+    const next = safeNext(c.req.query('next'));
+    c.header('Referrer-Policy', 'no-referrer');
+    c.header('Cache-Control', 'no-store');
+    return c.html(String(<SignInConfirm token={token} next={next} account={accountLabel(user)} connectGoogle={next === '/oauth/google/connect' && cfg.google.enabled} />));
+  });
+
+  app.post('/auth/:token', async (c) => {
+    if (!sameOrigin(c)) return c.html(expiredLink(), 403);
+    const form = await c.req.parseBody();
     const row = await auth.consumeLoginToken(c.req.param('token'));
-    if (!row?.user_id) return c.html(String(<SimpleMessage title="That link has expired" body="Sign-in links work once, for a short time. Ask for a new one." href="/login" cta="Get a new link" />), 400);
+    if (!row?.user_id) return c.html(expiredLink(), 400);
     const user = await users.get(row.user_id);
     if (!user || user.status === 'deleted') return c.redirect('/login');
     await startSession(c, user);
-    const next = c.req.query('next');
-    return c.redirect(next && next.startsWith('/') && !next.startsWith('//') ? next : '/app');
+    const next = safeNext(form.next);
+    if (next === '/oauth/google/connect' && cfg.google.enabled) return startGoogleOAuth(c, user);
+    return c.redirect(next);
   });
 
   app.post('/logout', async (c) => {
@@ -243,6 +294,7 @@ export function createApp(): Hono<AppEnv> {
           googleAccount={integ?.status === 'active' ? integ.account ?? 'Connected' : null}
           identities={ids}
           billing={{ enabled: cfg.stripe.enabled, plan: user.plan, trialDaysLeft: trialDaysLeft(user), status: user.subscription_status }}
+          voice={{ enabled: Boolean(cfg.telnyx.apiKey && cfg.telnyx.voiceAssistantId) }}
           notice={billingNotice}
         />,
       ),
@@ -318,7 +370,9 @@ export function createApp(): Hono<AppEnv> {
     if (action === 'pause') await routines.setStatus(user.id, r.id, 'paused');
     else if (action === 'cancel') {
       await routines.setStatus(user.id, r.id, 'cancelled');
+      // Record the choice in settings so a later settings change doesn't bring it back.
       if (r.kind === 'brief') await users.updateSettings(user.id, { briefTime: null });
+      if (r.kind === 'checkin' && user.settings.proactivity !== 'off') await users.updateSettings(user.id, { proactivity: 'low' });
     } else if (action === 'resume') {
       const next = r.schedule_type === 'cron' && r.cron ? nextCronRun(r.cron, r.timezone) : r.run_at && r.run_at > new Date() ? r.run_at : null;
       await routines.update(user.id, r.id, { status: next ? 'active' : 'done', nextRunAt: next });
@@ -358,6 +412,14 @@ export function createApp(): Hono<AppEnv> {
     if (qs && qe && isValidHHMM(qs) && isValidHHMM(qe)) settings.quietHours = { start: qs, end: qe };
     if (typeof b.meeting_nudges === 'boolean') settings.meetingNudges = b.meeting_nudges;
     if (typeof b.voice_replies === 'boolean') settings.voiceReplies = b.voice_replies;
+    if (typeof b.voice_require_pin === 'boolean') settings.voiceRequirePin = b.voice_require_pin;
+    if (typeof b.voice_pin === 'string') {
+      const pin = b.voice_pin.replace(/\s+/g, '');
+      if (pin === '') settings.voicePin = null;
+      else if (!isValidPin(pin)) return c.json({ error: `A voice PIN is ${PIN_MIN} to ${PIN_MAX} digits.` }, 400);
+      else if (/^(\d)\1+$/.test(pin) || '0123456789'.includes(pin) || '9876543210'.includes(pin)) return c.json({ error: 'Pick a PIN that’s harder to guess than a run or a repeated digit.' }, 400);
+      else settings.voicePin = hashPin(user.id, pin);
+    }
     let updated = Object.keys(patch).length ? await users.update(user.id, patch) : user;
     if (Object.keys(settings).length) updated = await users.updateSettings(user.id, settings);
     if (updated.status === 'onboarding' && updated.name && updated.timezone !== 'UTC') updated = await users.update(user.id, { status: 'active' });
@@ -389,6 +451,13 @@ export function createApp(): Hono<AppEnv> {
 
   app.post('/api/account/delete', requireApi, async (c) => {
     const user = c.get('user');
+    // Stop the billing first: a deleted account must never keep being charged.
+    try {
+      await cancelSubscription(user);
+    } catch (err) {
+      log.error({ err: String(err), user: user.id }, 'could not cancel subscription on account deletion');
+      return c.json({ error: 'We couldn’t cancel your subscription just now, so nothing was deleted. Try again in a minute, or cancel it under Billing first.' }, 502);
+    }
     await memory.wipe(user);
     await users.delete(user.id);
     await endSession(c);
@@ -397,24 +466,32 @@ export function createApp(): Hono<AppEnv> {
   });
 
   // ------------------------------------------------------------------ Google OAuth
+  // The flow is bound to the signed-in browser: the callback only completes for the same session
+  // that started it (nonce cookie + user id in the signed state), so nobody can get their own
+  // Google account attached to someone else's assistant, or the reverse, by sharing a link.
   app.get('/oauth/google/connect', requirePage, (c) => {
     if (!cfg.google.enabled) return c.redirect('/app/settings');
-    return c.redirect(authUrl(sealState({ uid: c.get('user').id, p: 'google' }, 900)));
+    return c.html(String(<SignInConfirm token="" next="/oauth/google/connect" account={accountLabel(c.get('user'))} connectGoogle startUrl="/oauth/google/start" />));
   });
 
-  // Link sent in chat (signed, expiring): starts OAuth for that user without a web session.
-  app.get('/oauth/google/start', (c) => {
-    const s = openState<{ uid: string; p: string }>(c.req.query('s') ?? '');
-    if (!s || s.p !== 'google' || !cfg.google.enabled) return c.html(String(<SimpleMessage title="That link has expired" body="Ask your assistant for a new link to connect Google." />), 400);
-    return c.redirect(authUrl(sealState({ uid: s.uid, p: 'google' }, 900)));
+  app.post('/oauth/google/start', requirePage, (c) => {
+    if (!cfg.google.enabled) return c.redirect('/app/settings');
+    if (!sameOrigin(c)) return c.redirect('/app/settings');
+    return startGoogleOAuth(c, c.get('user'));
   });
 
   app.get('/oauth/google/callback', async (c) => {
-    const s = openState<{ uid: string; p: string }>(c.req.query('state') ?? '');
+    const failed = (body: string) =>
+      c.html(String(<SimpleMessage title="Google wasn’t connected" body={body} href="/app/settings" cta="Open settings" />), 400);
+    const s = openState<{ uid: string; p: string; n?: string }>(c.req.query('state') ?? '');
     const code = c.req.query('code');
-    if (!s || s.p !== 'google' || !code) return c.html(String(<SimpleMessage title="Google wasn’t connected" body="The request expired or was cancelled. Try again from your assistant." href="/app/settings" cta="Open settings" />), 400);
-    const user = await users.get(s.uid);
-    if (!user) return c.redirect('/');
+    const nonce = getCookie(c, OAUTH_COOKIE);
+    deleteCookie(c, OAUTH_COOKIE, { path: '/oauth/google' });
+    if (!s || s.p !== 'google' || !code) return failed('The request expired or was cancelled. Try again from Settings.');
+    const user = await currentUser(c);
+    if (!user || user.id !== s.uid || !nonce || !s.n || nonce !== s.n) {
+      return failed('This browser didn’t start that request. Open Settings on this device and connect Google from there.');
+    }
     const integ = await completeOAuth(user.id, code);
     await audit.add(user.id, 'user', 'google.connected', { summary: integ.account ?? undefined });
     await sendToUser(user, `Google is connected${integ.account ? ` (${integ.account})` : ''}. I can now see your calendar and email. Try “what does my week look like?”`, {
@@ -450,7 +527,13 @@ export function createApp(): Hono<AppEnv> {
   const bot = telegramBot();
   if (bot && cfg.telegram.mode === 'webhook') {
     const handle = webhookCallback(bot, 'hono', { secretToken: cfg.telegram.webhookSecret, timeoutMilliseconds: 9000 });
-    app.post('/webhooks/telegram', (c) => handle(c) as Promise<Response>);
+    const expected = Buffer.from(cfg.telegram.webhookSecret);
+    app.post('/webhooks/telegram', (c) => {
+      // Checked here first: grammy contacts Telegram (getMe) before it looks at the secret.
+      const given = Buffer.from(c.req.header('x-telegram-bot-api-secret-token') ?? '');
+      if (given.length !== expected.length || !timingSafeEqual(given, expected)) return c.json({ error: 'unauthorized' }, 401);
+      return handle(c) as Promise<Response>;
+    });
   }
 
   app.post('/webhooks/telnyx/messaging', async (c) => {

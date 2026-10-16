@@ -2,13 +2,15 @@ import { approvals, audit, messages } from '../db/repo.js';
 import type { Approval, ChannelName, User } from '../db/types.js';
 import { db } from '../db/index.js';
 import { log } from '../log.js';
+import type { OutboundButton } from '../channels/types.js';
 import { findTool } from './tools/index.js';
 import type { ToolContext, ToolSpec } from './tools/spec.js';
 
 /**
  * The approval gate. Tools that send, buy, call or delete on the user's behalf never run inside
  * the model's loop: they create a pending approval, and only an explicit yes from the user's own
- * channel (or a button in their dashboard) executes them. The model cannot approve its own actions.
+ * channel (a reply, a button, or the dashboard) executes them. The model cannot approve its own
+ * actions, and the user always sees a summary written by code, not by the model.
  */
 
 export async function requestApproval(spec: ToolSpec, input: unknown, summary: string, ctx: ToolContext & { created?: Approval[] }): Promise<Record<string, unknown>> {
@@ -21,35 +23,137 @@ export async function requestApproval(spec: ToolSpec, input: unknown, summary: s
     status: 'waiting_for_user_approval',
     approval_code: a.short_code,
     summary,
-    note: 'Nothing has been done yet. Show the user exactly what will happen (recipients, text, time, number) and ask them to reply YES to go ahead or NO to cancel. Do not claim it is done.',
+    note:
+      ctx.channel === 'voice'
+        ? 'Nothing has been done yet. The exact details are being texted to the user to confirm. Tell them that in one short sentence.'
+        : 'Nothing has been done yet. The exact details and a YES/NO prompt are attached under your reply automatically, so do not repeat the full text: say in a sentence what you prepared and that it is waiting for their OK. Never claim it is done.',
   };
 }
 
-const YES = /^(y|yes|yep|yeah|yup|ya|sure|ok|okay|go|go ahead|do it|send|send it|call|approve|approved|confirm|confirmed|please do|👍|✅)\b/i;
-const NO = /^(n|no|nope|nah|cancel|don'?t|stop|reject|deny|never ?mind|👎|❌)\b/i;
-const CHANGE = /\b(but|change|instead|edit|actually|wait|except|make it|rather)\b/i;
+// ---------------------------------------------------------------------------------------------
+// Reading a reply as a decision
+// ---------------------------------------------------------------------------------------------
+
+const YES_WORD = '(?:yes|y|yep|yeah|yup|ya|yea|sure|ok|okay|k|kk|approve|approved|confirm|confirmed|go|send|call|book)';
+const YES_TAIL = '(?:please|pls|thanks|thank you|ty|go ahead|do it|send it|call them|book it|thats fine|go for it|send|call)';
+const YES_ALONE = '(?:go ahead|do it|send it|call them|book it|please do|sounds good|looks good|all good|go for it|👍|✅|👌|🆗|👍🏻|👍🏼|👍🏽|👍🏾|👍🏿)';
+const NO_WORD = '(?:no|n|nope|nah|cancel|cancel it|cancel that|reject|deny|declined?|dont|dont send|dont send it|do not|do not send|never ?mind|forget it|👎|❌|🚫)';
+const NO_TAIL = '(?:thanks|thank you|please|pls)';
+
+const YES_RE = new RegExp(`^(?:${YES_WORD}|${YES_ALONE})(?: ?(?:${YES_WORD}|${YES_ALONE}|${YES_TAIL}))*$`, 'u');
+const NO_RE = new RegExp(`^${NO_WORD}(?: ?(?:${NO_WORD}|${NO_TAIL}))*$`, 'u');
+const ALL_RE = /\s+(?:to\s+)?(?:all|both|all of them|both of them|everything)$/u;
+
+/** A bare yes counts for a request only while it is the newest thing the assistant said. */
+const BARE_REPLY_WINDOW_MS = 12 * 3600_000;
 
 export type ApprovalMatch =
-  | { kind: 'decision'; decision: 'approved' | 'rejected'; approval: Approval }
-  | { kind: 'ambiguous'; decision: 'approved' | 'rejected'; pending: Approval[] };
+  | { kind: 'decision'; decision: 'approved' | 'rejected'; approvals: Approval[] }
+  | { kind: 'clarify'; decision: 'approved' | 'rejected'; pending: Approval[] };
 
-/** Deterministic: only short, unambiguous yes/no replies count as decisions. */
+function normalise(text: string): string {
+  return text
+    .toLowerCase()
+    .replace(/[’‘`´]/g, "'")
+    .replace(/'/g, '')
+    .replace(/[.,!?;:"“”()[\]*_~-]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+/**
+ * Deterministic: a reply is a decision only when the WHOLE message is a yes or a no (optionally
+ * with an approval code, "please", "thanks"…). "Yes I'm free Tuesday" or "ok but change the time"
+ * are conversation, not approvals.
+ *
+ *  - "yes K7PD" / "no K7PD" decide that request, whenever it was asked.
+ *  - a bare "yes" decides the request(s) in the assistant's newest message, and nothing older.
+ *  - anything else returns null and goes to the conversation as usual.
+ */
 export async function matchApprovalReply(user: User, text: string): Promise<ApprovalMatch | null> {
-  const t = text.trim();
-  if (!t || t.length > 60 || CHANGE.test(t)) return null;
-  const isYes = YES.test(t);
-  const isNo = !isYes && NO.test(t);
-  if (!isYes && !isNo) return null;
+  const raw = text.trim();
+  // A question ("yes?") is hesitation, not a decision.
+  if (!raw || raw.length > 80 || /\?\s*$/.test(raw)) return null;
   const pending = await approvals.pending(user.id);
   if (pending.length === 0) return null;
-  const decision = isYes ? 'approved' : 'rejected';
-  const coded = pending.find((a) => new RegExp(`\\b${a.short_code}\\b`, 'i').test(t));
-  if (coded) return { kind: 'decision', decision, approval: coded };
-  if (pending.length === 1) return { kind: 'decision', decision, approval: pending[0]! };
-  // "yes" with several waiting: approve only when they asked for all of them explicitly.
-  if (/\ball\b/i.test(t)) return { kind: 'ambiguous', decision, pending };
-  return { kind: 'ambiguous', decision, pending };
+
+  let norm = ` ${normalise(raw)} `;
+  const coded: Approval[] = [];
+  for (const a of pending) {
+    const code = ` ${a.short_code.toLowerCase()} `;
+    if (norm.includes(code)) {
+      coded.push(a);
+      norm = norm.split(code).join(' ');
+    }
+  }
+  norm = norm.replace(/\s+/g, ' ').trim();
+  let all = false;
+  if (ALL_RE.test(norm)) {
+    all = true;
+    norm = norm.replace(ALL_RE, '').trim();
+  }
+  const decision = YES_RE.test(norm) ? 'approved' : NO_RE.test(norm) ? 'rejected' : null;
+  if (!decision) return null;
+  if (coded.length) return { kind: 'decision', decision, approvals: coded };
+
+  const asked = await justAsked(user.id, pending);
+  if (asked.length === 0) return null;
+  if (asked.length === 1 || all) return { kind: 'decision', decision, approvals: asked };
+  return { kind: 'clarify', decision, pending: asked };
 }
+
+/** The pending requests presented in the assistant's newest message, if it is recent. */
+async function justAsked(userId: string, pending: Approval[]): Promise<Approval[]> {
+  const last = await messages.lastAssistant(userId);
+  if (!last || Date.now() - last.created_at.getTime() > BARE_REPLY_WINDOW_MS) return [];
+  const ids = Array.isArray(last.meta.approvals) ? (last.meta.approvals as string[]) : [];
+  return pending.filter((a) => ids.includes(a.id));
+}
+
+// ---------------------------------------------------------------------------------------------
+// Presenting requests
+// ---------------------------------------------------------------------------------------------
+
+function clip(s: string, max: number): string {
+  return s.length > max ? `${s.slice(0, max - 1).trimEnd()}…` : s;
+}
+
+/**
+ * The code-written request appended under the model's reply on text channels, so what the user
+ * approves is exactly what will run, whatever the model said. (The web shows approval cards.)
+ */
+export function approvalNotice(list: Approval[], channel: ChannelName): string {
+  if (list.length === 0 || channel === 'web' || channel === 'cli' || channel === 'voice') return '';
+  const max = channel === 'sms' ? 700 : 1500;
+  if (list.length === 1) {
+    const a = list[0]!;
+    const full = a.summary.length > max ? `${clip(a.summary, max)}\n(Full text in your dashboard.)` : a.summary;
+    // Not "reply CANCEL": on SMS that word is a carrier opt-out keyword.
+    const how = channel === 'telegram' ? 'Tap a button, or reply YES to go ahead or NO if not.' : 'Reply YES to go ahead, or NO if not.';
+    return `Needs your OK:\n${full}\n${how}`;
+  }
+  const lines = list.map((a) => `- ${clip(a.summary.split('\n')[0]!, 160)}: reply "yes ${a.short_code}"`);
+  return `These need your OK:\n${lines.join('\n')}\nReply "yes all" for everything, or "no" with a code to cancel one.`;
+}
+
+export function approvalButtons(list: Approval[]): OutboundButton[] {
+  if (list.length !== 1) return [];
+  const a = list[0]!;
+  return [
+    { label: 'Yes, go ahead', data: `ap:${a.id}:y` },
+    { label: 'No', data: `ap:${a.id}:n` },
+  ];
+}
+
+/** Model reply + the code-written request, for a text channel. */
+export function withApprovalNotice(text: string, list: Approval[], channel: ChannelName): string {
+  const notice = approvalNotice(list, channel);
+  return notice ? `${text.trim()}\n\n${notice}` : text;
+}
+
+// ---------------------------------------------------------------------------------------------
+// Deciding
+// ---------------------------------------------------------------------------------------------
 
 export interface ApprovalOutcome {
   ok: boolean;
@@ -63,7 +167,7 @@ export async function decideApproval(user: User, approvalId: string, decision: '
   await audit.add(user.id, 'user', `approval.${decision}`, { approval: a.id, tool: a.tool, channel });
   if (decision === 'rejected') {
     await messages.add(user.id, 'event', channel, `Cancelled at the user's request: ${a.summary}`, { approval: a.id });
-    return { ok: true, message: 'Okay, cancelled. Nothing was sent.' };
+    return { ok: true, message: `Okay, cancelled: ${lowerFirst(a.summary.split('\n')[0]!)}. Nothing was done.` };
   }
   const spec = findTool(a.tool);
   if (!spec) {
@@ -75,6 +179,7 @@ export async function decideApproval(user: User, approvalId: string, decision: '
     const result = (await spec.run(a.input as never, ctx)) as Record<string, unknown> | undefined;
     await approvals.finish(a.id, 'executed', result ?? null);
     await audit.add(user.id, 'agent', a.tool, { approval: a.id, input: a.input, result: summariseResult(result) });
+    for (const act of ctx.activity) await audit.add(user.id, 'agent', act.tool, { summary: act.summary });
     const firstLine = a.summary.split('\n')[0]!;
     const done = typeof result?.message === 'string' ? (result.message as string) : `Done: ${lowerFirst(firstLine)}.`;
     await messages.add(user.id, 'event', channel, `Approved by the user and done: ${firstLine}`, { approval: a.id, result: summariseResult(result) });
@@ -88,6 +193,19 @@ export async function decideApproval(user: User, approvalId: string, decision: '
   }
 }
 
+/** Several decisions from one reply ("yes all", "yes K7PD 3HXM"): one combined answer. */
+export async function decideApprovals(user: User, list: Approval[], decision: 'approved' | 'rejected', channel: ChannelName): Promise<ApprovalOutcome> {
+  const outcomes: ApprovalOutcome[] = [];
+  for (const a of list) outcomes.push(await decideApproval(user, a.id, decision, channel));
+  if (outcomes.length === 1) return outcomes[0]!;
+  return { ok: outcomes.every((o) => o.ok), message: outcomes.map((o) => `- ${o.message}`).join('\n') };
+}
+
+export function clarifyMessage(pending: Approval[], decision: 'approved' | 'rejected'): string {
+  const word = decision === 'approved' ? 'yes' : 'no';
+  return `A few things are waiting for you. Which one?\n${pending.map((a) => `- ${clip(a.summary.split('\n')[0]!, 160)}: reply "${word} ${a.short_code}"`).join('\n')}\nOr reply "${word} all".`;
+}
+
 function lowerFirst(s: string): string {
   return s.charAt(0).toLowerCase() + s.slice(1);
 }
@@ -96,9 +214,4 @@ function summariseResult(result: unknown): unknown {
   if (result === undefined || result === null) return null;
   const s = JSON.stringify(result);
   return s.length > 2000 ? `${s.slice(0, 2000)}…` : result;
-}
-
-export function approvalPrompt(pending: Approval[]): string {
-  if (pending.length === 0) return '';
-  return pending.map((a) => `• ${a.summary.split('\n')[0]} — reply "yes ${a.short_code}" or "no ${a.short_code}"`).join('\n');
 }

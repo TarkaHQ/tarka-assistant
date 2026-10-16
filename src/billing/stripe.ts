@@ -6,13 +6,13 @@ import { log } from '../log.js';
 
 /** Minimal Stripe over REST: Checkout for the monthly plan, and the webhook that flips the plan. */
 
-async function stripe<T>(path: string, form: Record<string, string>): Promise<T> {
+async function stripe<T>(path: string, form: Record<string, string>, method: 'POST' | 'DELETE' = 'POST'): Promise<T> {
   const key = config().stripe.secretKey;
   if (!key) throw new Error('Stripe is not configured');
   const res = await fetch(`https://api.stripe.com/v1${path}`, {
-    method: 'POST',
+    method,
     headers: { Authorization: `Bearer ${key}`, 'Content-Type': 'application/x-www-form-urlencoded' },
-    body: new URLSearchParams(form),
+    body: method === 'POST' ? new URLSearchParams(form) : undefined,
     signal: AbortSignal.timeout(20_000),
   });
   const body = (await res.json()) as T & { error?: { message?: string } };
@@ -37,6 +37,17 @@ export async function checkoutUrl(user: User): Promise<string> {
   else if (user.email) form.customer_email = user.email;
   const session = await stripe<{ url: string }>('/checkout/sessions', form);
   return session.url;
+}
+
+/** Ends the subscription now (account deletion). A subscription already gone is fine. */
+export async function cancelSubscription(user: User): Promise<void> {
+  if (!user.stripe_subscription_id || !config().stripe.secretKey) return;
+  try {
+    await stripe(`/subscriptions/${encodeURIComponent(user.stripe_subscription_id)}`, {}, 'DELETE');
+  } catch (err) {
+    const msg = String(err);
+    if (!/No such subscription|canceled/i.test(msg)) throw err;
+  }
 }
 
 export async function portalUrl(user: User): Promise<string | null> {
@@ -72,6 +83,12 @@ export async function handleStripeEvent(event: StripeEvent): Promise<void> {
   const o = event.data.object;
   const meta = (o.metadata ?? {}) as Record<string, string>;
   const userId = (o.client_reference_id as string | undefined) ?? meta.user_id;
+  // Events for accounts that no longer exist (deleted, or another environment) are acknowledged
+  // and ignored, so Stripe doesn't retry them for days.
+  if (userId && !(/^[0-9a-f-]{36}$/i.test(userId) && (await users.get(userId)))) {
+    log.info({ type: event.type }, 'stripe event for an unknown user ignored');
+    return;
+  }
   switch (event.type) {
     case 'checkout.session.completed': {
       if (!userId) return;

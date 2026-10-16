@@ -11,6 +11,10 @@ export interface UserSettings {
   voiceReplies?: boolean;
   /** Free-form notes the user gave about how they want to be helped. */
   helpWith?: string;
+  /** Keyed hash of the voice PIN (never the PIN itself). */
+  voicePin?: { hash: string; length: number } | null;
+  /** Ask for the PIN even when the carrier vouches for the caller's number. */
+  voiceRequirePin?: boolean;
 }
 
 export interface User {

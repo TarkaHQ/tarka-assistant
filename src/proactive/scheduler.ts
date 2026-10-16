@@ -1,8 +1,9 @@
 import { DateTime } from 'luxon';
 import { config } from '../config.js';
-import { approvals, identities, messages, nudges, routines, users, calls, audit } from '../db/repo.js';
+import { approvals, identities, kv, messages, nudges, routines, users, calls, audit } from '../db/repo.js';
 import type { ChannelName, Routine, User } from '../db/types.js';
 import { log } from '../log.js';
+import { approvalButtons, withApprovalNotice } from '../agent/approvals.js';
 import { runTurn } from '../agent/turn.js';
 import { sendToUser } from '../channels/deliver.js';
 import { adapterFor } from '../channels/registry.js';
@@ -41,7 +42,11 @@ function planAllows(user: User): boolean {
 export async function runRoutine(routineId: string, userId: string): Promise<void> {
   const user = await users.get(userId);
   const routine = user ? await routines.get(userId, routineId) : null;
-  if (!user || !routine || user.status !== 'active' || !planAllows(user)) return;
+  if (!user || !routine || !planAllows(user)) return;
+  // Someone still in onboarding gets the reminders and tasks they asked for; the brief and
+  // check-ins start once onboarding is done.
+  const own = routine.kind === 'reminder' || routine.kind === 'task' || routine.kind === 'followup';
+  if (user.status !== 'active' && !(user.status === 'onboarding' && own)) return;
   if (routine.status === 'cancelled' || routine.status === 'paused') return;
 
   if (routine.kind === 'reminder') {
@@ -51,7 +56,26 @@ export async function runRoutine(routineId: string, userId: string): Promise<voi
   }
 
   const cfg = config();
-  if (!cfg.proactive.enabled || user.settings.proactivity === 'off') return;
+  // PROACTIVE_ENABLED is the operator's switch for every agent-initiated turn; the user's own
+  // "proactivity: off" stops the brief and check-ins but not tasks they asked for.
+  if (!cfg.proactive.enabled) return;
+  if (!own && user.settings.proactivity === 'off') return;
+
+  if (routine.kind === 'task' || routine.kind === 'followup') {
+    // Each run is a full agent turn: a daily ceiling keeps a runaway schedule from burning money.
+    const day = DateTime.now().setZone(safeZone(user.timezone)).toISODate();
+    const runs = await kv.incr(`task-runs:${user.id}:${day}`);
+    if (runs > cfg.limits.taskRunsPerDay) {
+      if (runs === cfg.limits.taskRunsPerDay + 1) {
+        await sendToUser(user, `I've run ${cfg.limits.taskRunsPerDay} scheduled tasks today, which is the daily limit, so I skipped “${routine.title}”. It will run again next time.`, {
+          proactive: true,
+          persist: { role: 'assistant', meta: { source: 'system' } },
+        });
+      }
+      await audit.add(user.id, 'system', 'task.skipped', { routine: routine.id, summary: `Daily limit reached: ${routine.title}` });
+      return;
+    }
+  }
 
   if (routine.kind === 'brief' || routine.kind === 'checkin') {
     if (isQuiet(user)) {
@@ -77,7 +101,7 @@ export async function runRoutine(routineId: string, userId: string): Promise<voi
     await audit.add(user.id, 'agent', `${routine.kind}.skipped`, { routine: routine.id, reason: 'nothing worth sending' });
     return;
   }
-  await sendToUser(user, turn.text, { channel, proactive: true });
+  await sendToUser(user, withApprovalNotice(turn.text, turn.approvals, channel), { channel, proactive: true, buttons: approvalButtons(turn.approvals) });
 }
 
 /** Meeting heads-ups: no model call, just the calendar. Every few minutes in the worker. */
