@@ -1,0 +1,182 @@
+import * as chrono from 'chrono-node';
+import { CronExpressionParser } from 'cron-parser';
+import { DateTime } from 'luxon';
+import type { User } from '../db/types.js';
+
+export function isValidTimezone(tz: string): boolean {
+  try {
+    new Intl.DateTimeFormat('en-US', { timeZone: tz });
+    return DateTime.local().setZone(tz).isValid;
+  } catch {
+    return false;
+  }
+}
+
+export function safeZone(tz: string | null | undefined): string {
+  return tz && isValidTimezone(tz) ? tz : 'UTC';
+}
+
+/** "Friday 16 October 2026, 9:42 AM" in the given zone. */
+export function describeLocal(date: Date, tz: string): string {
+  return DateTime.fromJSDate(date).setZone(safeZone(tz)).toFormat("cccc d LLLL yyyy, h:mm a");
+}
+
+export function shortLocal(date: Date, tz: string): string {
+  const d = DateTime.fromJSDate(date).setZone(safeZone(tz));
+  const now = DateTime.now().setZone(safeZone(tz));
+  if (d.hasSame(now, 'day')) return `today ${d.toFormat('h:mm a')}`;
+  if (d.hasSame(now.plus({ days: 1 }), 'day')) return `tomorrow ${d.toFormat('h:mm a')}`;
+  if (Math.abs(d.diff(now, 'days').days) < 6) return d.toFormat('ccc h:mm a');
+  return d.toFormat('ccc d LLL, h:mm a');
+}
+
+/**
+ * Parses a time the model or user gave: ISO 8601 (with or without offset; without one it is read
+ * in the user's zone) or natural language ("tomorrow at 9", "in 20 minutes", "next Friday 6pm").
+ * Returns null when nothing usable is found.
+ */
+export function parseWhen(input: string, tz: string, now = new Date()): Date | null {
+  const zone = safeZone(tz);
+  const text = input.trim();
+  if (!text) return null;
+
+  // ISO forms first.
+  if (/^\d{4}-\d{2}-\d{2}/.test(text)) {
+    const hasOffset = /([zZ]|[+-]\d{2}:?\d{2})$/.test(text);
+    const dt = hasOffset ? DateTime.fromISO(text, { setZone: true }) : DateTime.fromISO(text, { zone });
+    if (dt.isValid) return dt.toJSDate();
+  }
+
+  // Natural language, parsed against the user's wall-clock time so DST is handled by luxon.
+  const localNow = DateTime.fromJSDate(now).setZone(zone);
+  const wallClock = new Date(Date.UTC(localNow.year, localNow.month - 1, localNow.day, localNow.hour, localNow.minute, localNow.second));
+  const results = chrono.parse(text, { instant: wallClock, timezone: 0 }, { forwardDate: true });
+  const first = results[0];
+  if (!first) return null;
+  // chrono worked in "fake UTC" wall-clock time; read its fields back as local time in the zone.
+  const target = first.date();
+  const relative = /\b(in|after)\s+(\d|an?\b|half\b|a few\b|couple)|\bfrom now\b/i.test(first.text);
+  let hour = target.getUTCHours();
+  let minute = target.getUTCMinutes();
+  if (!relative && !first.start.isCertain('hour')) {
+    hour = 9; // a date with no time ("on Friday") means the morning
+    minute = 0;
+  }
+  const dt = DateTime.fromObject(
+    { year: target.getUTCFullYear(), month: target.getUTCMonth() + 1, day: target.getUTCDate(), hour, minute, second: relative ? target.getUTCSeconds() : 0 },
+    { zone },
+  );
+  if (!dt.isValid) return null;
+  return dt.toJSDate();
+}
+
+/** Next occurrence of a 5-field cron expression, evaluated in `tz`, strictly after `after`. */
+export function nextCronRun(cron: string, tz: string, after = new Date()): Date | null {
+  try {
+    const expr = CronExpressionParser.parse(cron, { currentDate: after, tz: safeZone(tz) });
+    return expr.next().toDate();
+  } catch {
+    return null;
+  }
+}
+
+export function isValidCron(cron: string): boolean {
+  const fields = cron.trim().split(/\s+/);
+  if (fields.length !== 5) return false;
+  return nextCronRun(cron, 'UTC') !== null;
+}
+
+/**
+ * Turns a simple repeat rule into cron at the given local time:
+ * daily | weekdays | weekends | weekly | monthly | hourly | a 5-field cron expression.
+ */
+export function repeatToCron(repeat: string, firstLocal: DateTime): string | null {
+  const r = repeat.trim().toLowerCase();
+  const m = firstLocal.minute;
+  const h = firstLocal.hour;
+  switch (r) {
+    case 'hourly':
+      return `${m} * * * *`;
+    case 'daily':
+    case 'every day':
+      return `${m} ${h} * * *`;
+    case 'weekdays':
+    case 'every weekday':
+      return `${m} ${h} * * 1-5`;
+    case 'weekends':
+      return `${m} ${h} * * 0,6`;
+    case 'weekly':
+    case 'every week':
+      return `${m} ${h} * * ${firstLocal.weekday % 7}`;
+    case 'monthly':
+    case 'every month':
+      return `${m} ${h} ${firstLocal.day} * *`;
+    default:
+      return isValidCron(repeat) ? repeat.trim() : null;
+  }
+}
+
+/** Human description of a cron in plain words (covers the shapes this app creates). */
+export function describeCron(cron: string): string {
+  const [min, hour, dom, mon, dow] = cron.trim().split(/\s+/);
+  const time = hour !== undefined && min !== undefined && /^\d+$/.test(hour) && /^\d+$/.test(min)
+    ? DateTime.fromObject({ hour: Number(hour), minute: Number(min) }).toFormat('h:mm a')
+    : null;
+  if (hour === '*' && dom === '*' && dow === '*') return `every hour at :${(min ?? '0').padStart(2, '0')}`;
+  if (time && dom === '*' && mon === '*') {
+    if (dow === '*') return `every day at ${time}`;
+    if (dow === '1-5') return `weekdays at ${time}`;
+    if (dow === '0,6' || dow === '6,0') return `weekends at ${time}`;
+    const names = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday'];
+    if (dow && /^\d$/.test(dow)) return `every ${names[Number(dow)]} at ${time}`;
+  }
+  if (time && dom && /^\d+$/.test(dom) && mon === '*' && dow === '*') return `monthly on day ${dom} at ${time}`;
+  return `on schedule "${cron}"`;
+}
+
+function minutesOf(hhmm: string): number | null {
+  const m = /^(\d{1,2}):(\d{2})$/.exec(hhmm.trim());
+  if (!m) return null;
+  const h = Number(m[1]);
+  const min = Number(m[2]);
+  if (h > 23 || min > 59) return null;
+  return h * 60 + min;
+}
+
+export function isValidHHMM(hhmm: string): boolean {
+  return minutesOf(hhmm) !== null;
+}
+
+/** Quiet hours default to 22:00–07:30 local. */
+export function quietHours(user: Pick<User, 'settings'>): { start: string; end: string } {
+  return user.settings.quietHours ?? { start: '22:00', end: '07:30' };
+}
+
+export function isQuiet(user: Pick<User, 'settings' | 'timezone'>, at = new Date()): boolean {
+  const { start, end } = quietHours(user);
+  const s = minutesOf(start);
+  const e = minutesOf(end);
+  if (s === null || e === null || s === e) return false;
+  const local = DateTime.fromJSDate(at).setZone(safeZone(user.timezone));
+  const now = local.hour * 60 + local.minute;
+  return s < e ? now >= s && now < e : now >= s || now < e;
+}
+
+/** The next moment quiet hours end (or `at` itself when not quiet). */
+export function endOfQuiet(user: Pick<User, 'settings' | 'timezone'>, at = new Date()): Date {
+  if (!isQuiet(user, at)) return at;
+  const { end } = quietHours(user);
+  const e = minutesOf(end) ?? 450;
+  const local = DateTime.fromJSDate(at).setZone(safeZone(user.timezone));
+  let candidate = local.set({ hour: Math.floor(e / 60), minute: e % 60, second: 0, millisecond: 0 });
+  if (candidate <= local) candidate = candidate.plus({ days: 1 });
+  return candidate.toJSDate();
+}
+
+export function startOfLocalDay(tz: string, at = new Date()): Date {
+  return DateTime.fromJSDate(at).setZone(safeZone(tz)).startOf('day').toJSDate();
+}
+
+export function startOfLocalMonth(tz: string, at = new Date()): Date {
+  return DateTime.fromJSDate(at).setZone(safeZone(tz)).startOf('month').toJSDate();
+}
