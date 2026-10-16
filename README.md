@@ -60,6 +60,7 @@ npm run dev            # web + worker
 npm run chat           # talk to it in the terminal as a local test user (/brief, /checkin, /reset)
 npm test               # unit + integration tests (needs Postgres on :5433, see vitest.config.ts)
 npm run typecheck
+npm run eval           # scenario evals against real Tarka models (needs TARKA_API_KEY; see scripts/evals.ts)
 ```
 
 ## Deploy

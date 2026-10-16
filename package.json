@@ -8,9 +8,10 @@
     "dev": "tsx watch --env-file-if-exists=.env src/main.ts",
     "start": "node --enable-source-maps dist/main.js",
     "build": "tsc -p tsconfig.json",
-    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "typecheck": "tsc --noEmit && tsc -p tsconfig.scripts.json",
     "chat": "tsx src/cli.ts",
-    "migrate": "tsx src/db/migrate-cli.ts"
+    "migrate": "tsx src/db/migrate-cli.ts",
+    "eval": "tsx --env-file-if-exists=.env scripts/evals.ts"
   },
   "license": "MIT",
   "private": "true",
