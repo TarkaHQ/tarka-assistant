@@ -26,7 +26,7 @@ import { syncSystemRoutines } from '../proactive/system-routines.js';
 import { randomToken, openState, sealState } from '../util/crypto.js';
 import { isValidHHMM, isValidTimezone, nextCronRun, startOfLocalMonth } from '../util/time.js';
 import { voiceCompletions, voiceModels } from '../voice/llm.js';
-import { ActivityPage, HomePage, HoodPage, MemoryPage, SchedulePage, SettingsPage, messageHtml, ApprovalCard, type ActivityEntry } from './pages/app.js';
+import { ActivityPage, HomePage, HoodPage, MemoryPage, SchedulePage, SettingsPage, messageHtml, ApprovalCard, UpcomingList, type ActivityEntry } from './pages/app.js';
 import { Landing, LoginPage, LoginSent, SimpleMessage } from './pages/public.js';
 import { endSession, rateLimited, requireApi, requirePage, startSession, type AppEnv } from './session.js';
 import { inboundKey } from '../channels/inbound.js';
@@ -276,9 +276,13 @@ export function createApp(): Hono<AppEnv> {
     const rows = (await messages.recent(user.id, 60)).filter((m) => m.id > after);
     const pending = await approvals.pending(user.id);
     const byId = new Map(pending.map((a) => [a.id, a]));
+    const upcoming = (await routines.forUser(user.id)).filter((r) => r.status === 'active' && r.next_run_at);
     return c.json({
       messages: rows.map((m) => ({ id: m.id, html: messageHtml(m, user, byId) })),
-      approvalsHtml: pending.length ? `<ul class="list">${pending.map((a) => String(<ApprovalCard a={a} tz={user.timezone} />)).join('')}</ul>` : undefined,
+      approvalsHtml: pending.length
+        ? `<ul class="list">${pending.map((a) => String(<ApprovalCard a={a} tz={user.timezone} />)).join('')}</ul>`
+        : '<p class="empty">Nothing needs your OK. Anything that sends, invites, deletes or calls will wait here.</p>',
+      upcomingHtml: String(<UpcomingList upcoming={upcoming} tz={user.timezone} />),
     });
   });
 

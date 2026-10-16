@@ -246,3 +246,47 @@ describe('scheduler', () => {
     expect(JSON.stringify(calls[0]!.prompt)).toContain('Task: morning brief');
   });
 });
+
+describe('voice', () => {
+  it('answers a known caller without email tools and texts approvals', async () => {
+    const { voiceCompletions } = await import('../src/voice/llm.js');
+    const { Hono } = await import('hono');
+    const user = await makeUser({ phone: '+4915100000060' });
+    const { calls } = scriptedModel([{ text: 'You have two meetings today.' }]);
+    const app = new Hono();
+    app.post('/v', (c) => voiceCompletions(c));
+    const res = await app.request('/v', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ model: 'tarka-assistant', messages: [{ role: 'system', content: 'x' }, { role: 'user', content: "what's on today?" }], extra_metadata: { telnyx_end_user_target: '+4915100000060' } }),
+    });
+    const body = (await res.json()) as { choices: { message: { content: string } }[] };
+    expect(body.choices[0]!.message.content).toBe('You have two meetings today.');
+    expect(calls[0]!.tools.some((t) => t.startsWith('email_'))).toBe(false);
+    const rows = await messages.recent(user.id);
+    expect(rows.map((r) => r.channel)).toEqual(['voice', 'voice']);
+  });
+
+  it('runs the concierge persona for outbound calls and keeps the transcript', async () => {
+    const { voiceCompletions } = await import('../src/voice/llm.js');
+    const { calls: callsRepo } = await import('../src/db/repo.js');
+    const { Hono } = await import('hono');
+    const user = await makeUser({ phone: '+4915100000061' });
+    const call = await callsRepo.create(user.id, { direction: 'outbound', to: '+4930123456', objective: 'Book a table for 2 on Friday at 7pm', meta: { business: 'Café Luna' } });
+    const { calls } = scriptedModel([{ text: 'Hello, I’m an AI assistant calling for Priya. Could I book a table for two on Friday at 7pm?' }]);
+    const app = new Hono();
+    app.post('/v', (c) => voiceCompletions(c));
+    const res = await app.request('/v', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ stream: true, messages: [{ role: 'user', content: 'Café Luna, how can I help?' }], extra_metadata: { ta_call_id: call.id }, tools: [{ type: 'function', function: { name: 'hangup', description: 'End the call', parameters: { type: 'object', properties: {} } } }] }),
+    });
+    const text = await res.text();
+    expect(text).toContain('chat.completion.chunk');
+    expect(text).toContain('[DONE]');
+    expect(JSON.stringify(calls[0]!.prompt)).toContain('Book a table for 2 on Friday at 7pm');
+    expect(calls[0]!.tools).toContain('hangup');
+    const updated = await callsRepo.get(call.id);
+    expect(updated!.transcript).toContain('Business: Café Luna, how can I help?');
+  });
+});

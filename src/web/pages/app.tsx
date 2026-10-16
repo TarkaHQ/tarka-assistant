@@ -20,6 +20,10 @@ const SOURCE_LABEL: Record<string, string> = {
 
 const CHANNEL_LABEL: Record<string, string> = { web: 'web', telegram: 'Telegram', sms: 'SMS', whatsapp: 'WhatsApp', voice: 'phone', email: 'email', cli: 'console' };
 
+function money(n: number): string {
+  return `$${n.toFixed(Number.isInteger(n * 100) ? 2 : 3)}`;
+}
+
 function time(d: Date, tz: string): string {
   return shortLocal(d, tz);
 }
@@ -105,6 +109,20 @@ function routineWhen(r: Routine, tz: string): string {
   return r.schedule_type === 'cron' && r.cron ? `${describeCron(r.cron)} · next ${next}` : next;
 }
 
+export const UpcomingList: FC<{ upcoming: Routine[]; tz: string }> = ({ upcoming, tz }) =>
+  upcoming.length ? (
+    <ul class="list">
+      {upcoming.slice(0, 5).map((r) => (
+        <li>
+          <div class="title">{r.title}</div>
+          <div class="sub">{routineWhen(r, tz)}</div>
+        </li>
+      ))}
+    </ul>
+  ) : (
+    <p class="empty">No reminders yet. Try “remind me to call Mum on Sunday at 6pm”.</p>
+  );
+
 export interface HomeProps {
   user: User;
   messages: MessageRow[];
@@ -157,11 +175,13 @@ export const HomePage: FC<HomeProps> = (p) => {
                 <h2>Waiting for you</h2>
               </div>
               <div class="panel-body">
+                <div data-approvals-list>
                 {p.approvals.length ? (
                   <ul class="list">{p.approvals.map((a) => <ApprovalCard a={a} tz={tz} />)}</ul>
                 ) : (
                   <p class="empty">Nothing needs your OK. Anything that sends, invites, deletes or calls will wait here.</p>
                 )}
+                </div>
               </div>
             </section>
 
@@ -173,18 +193,9 @@ export const HomePage: FC<HomeProps> = (p) => {
                 </a>
               </div>
               <div class="panel-body">
-                {p.upcoming.length ? (
-                  <ul class="list">
-                    {p.upcoming.slice(0, 5).map((r) => (
-                      <li>
-                        <div class="title">{r.title}</div>
-                        <div class="sub">{routineWhen(r, tz)}</div>
-                      </li>
-                    ))}
-                  </ul>
-                ) : (
-                  <p class="empty">No reminders yet. Try “remind me to call Mum on Sunday at 6pm”.</p>
-                )}
+                <div data-upcoming-list>
+                  <UpcomingList upcoming={p.upcoming} tz={tz} />
+                </div>
               </div>
             </section>
 
@@ -511,7 +522,12 @@ export interface HoodProps {
 }
 
 export const HoodPage: FC<HoodProps> = (p) => {
-  const max = Math.max(1, ...p.daily.map((d) => d.tokens));
+  const byDay = new Map(p.daily.map((d) => [d.day, d.tokens]));
+  const slots = Array.from({ length: 30 }, (_, i) => {
+    const day = new Date(Date.now() - (29 - i) * 86_400_000).toISOString().slice(0, 10);
+    return { day, tokens: byDay.get(day) ?? 0 };
+  });
+  const max = Math.max(1, ...slots.map((d) => d.tokens));
   return (
     <Layout title="Under the hood" user={p.user} active="/app/hood" scripts>
       <main class="page shell">
@@ -591,7 +607,7 @@ export const HoodPage: FC<HoodProps> = (p) => {
                       <span class="hint">{m.blurb}</span>
                       <br />
                       <span class="price">
-                        {m.price.in === 0 && m.price.out === 0 ? 'included in your plan' : `$${m.price.in.toFixed(2)} in · $${m.price.out.toFixed(2)} out per million tokens`}
+                        {m.price.in === 0 && m.price.out === 0 ? 'included in your plan' : `${money(m.price.in)} in · ${money(m.price.out)} out per million tokens`}
                       </span>
                     </span>
                   </label>
@@ -607,8 +623,8 @@ export const HoodPage: FC<HoodProps> = (p) => {
             <div class="panel-body">
               {p.daily.length ? (
                 <div class="bars" role="img" aria-label="Tokens per day for the last 30 days">
-                  {p.daily.map((d) => (
-                    <span style={`height:${Math.max(3, Math.round((d.tokens / max) * 100))}%`} title={`${d.day}: ${d.tokens.toLocaleString()} tokens`}></span>
+                  {slots.map((d) => (
+                    <span style={`height:${d.tokens ? Math.max(4, Math.round((d.tokens / max) * 100)) : 2}%;${d.tokens ? '' : 'opacity:0.25'}`} title={`${d.day}: ${d.tokens.toLocaleString()} tokens`}></span>
                   ))}
                 </div>
               ) : (

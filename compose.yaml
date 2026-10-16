@@ -1,0 +1,67 @@
+# Run Tarka Assistant anywhere with Docker: app + Postgres (pgvector) + Hindsight memory.
+#   cp .env.example .env   # fill in TARKA_API_KEY at least
+#   docker compose up -d
+# On a Tarka agent host use deploy/tarka.compose.yaml instead.
+
+services:
+  app:
+    build: .
+    image: ghcr.io/tarkahq/tarka-assistant:latest
+    env_file: .env
+    environment:
+      DATABASE_URL: postgres://assistant:${POSTGRES_PASSWORD:-assistant}@db:5432/assistant
+      HINDSIGHT_URL: http://hindsight:8888
+      ROLE: all
+    ports: ["8080:8080"]
+    depends_on:
+      db: { condition: service_healthy }
+      hindsight: { condition: service_started }
+    restart: unless-stopped
+
+  db:
+    image: pgvector/pgvector:pg17
+    environment:
+      POSTGRES_USER: assistant
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-assistant}
+      POSTGRES_DB: assistant
+    volumes:
+      - db-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U assistant -d assistant"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    restart: unless-stopped
+
+  hindsight:
+    image: ghcr.io/vectorize-io/hindsight-api:1.0.0
+    environment:
+      HINDSIGHT_API_DATABASE_URL: postgresql://assistant:${POSTGRES_PASSWORD:-assistant}@db:5432/assistant
+      HINDSIGHT_API_DATABASE_SCHEMA: hindsight
+      # Hindsight's own model calls (fact extraction, reflect) go to Tarka too.
+      HINDSIGHT_API_LLM_PROVIDER: openai
+      HINDSIGHT_API_LLM_BASE_URL: ${TARKA_BASE_URL:-https://tarka.rest/v1}
+      HINDSIGHT_API_LLM_API_KEY: ${TARKA_API_KEY:-}
+      HINDSIGHT_API_LLM_MODEL: ${MEMORY_MODEL:-qwen3.8-flash-next}
+      # Tarka's router caps replies at 32,768 tokens; Hindsight asks for 64,000 by default.
+      HINDSIGHT_API_RETAIN_MAX_COMPLETION_TOKENS: "16000"
+      HINDSIGHT_API_REFLECT_LLM_TIMEOUT: "120"
+      # Multilingual embedding and reranking models, run on CPU inside this container.
+      HINDSIGHT_API_EMBEDDINGS_PROVIDER: local
+      HINDSIGHT_API_EMBEDDINGS_LOCAL_MODEL: intfloat/multilingual-e5-small
+      HINDSIGHT_API_EMBEDDINGS_QUERY_PREFIX: "query: "
+      HINDSIGHT_API_EMBEDDINGS_PASSAGE_PREFIX: "passage: "
+      HINDSIGHT_API_RERANKER_PROVIDER: local
+      HINDSIGHT_API_RERANKER_LOCAL_MODEL: cross-encoder/mmarco-mMiniLMv2-L12-H384-v1
+      HINDSIGHT_API_RERANKER_MAX_CANDIDATES_LOW: "40"
+      HINDSIGHT_API_RERANKER_MAX_CANDIDATES_MID: "80"
+      HINDSIGHT_API_WORKER_ID: hindsight-1
+    volumes:
+      - hf-cache:/home/hindsight/.cache
+    depends_on:
+      db: { condition: service_healthy }
+    restart: unless-stopped
+
+volumes:
+  db-data:
+  hf-cache:

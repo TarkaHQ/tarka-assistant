@@ -9,6 +9,7 @@ import { log } from '../log.js';
 import { chatModel, costMicroUsd } from '../models/tarka.js';
 import { runTurn } from '../agent/turn.js';
 import { formatFor } from '../channels/format.js';
+import { sendToUser } from '../channels/deliver.js';
 
 /**
  * OpenAI-compatible endpoint that Telnyx AI Assistants call as their "custom LLM". Telnyx does the
@@ -155,6 +156,16 @@ async function personalReply(req: OAIRequest, caller: string): Promise<string> {
   const said = textOf(lastUser?.content).trim();
   if (!said) return `Hi${user.name ? ` ${user.name}` : ''}! What can I do for you?`;
   const turn = await runTurn({ user, channel: 'voice', text: said, trigger: 'message', persistUserMessage: true });
+  // Approvals are confirmed in writing, on the person's own text channel.
+  for (const a of turn.approvals) {
+    await sendToUser(user, `From our call — reply YES to confirm or NO to cancel:\n${a.summary}`, {
+      buttons: [
+        { label: 'Yes, go ahead', data: `ap:${a.id}:y` },
+        { label: 'No', data: `ap:${a.id}:n` },
+      ],
+      persist: { role: 'assistant', meta: { source: 'approval', approvals: [a.id] } },
+    }).catch((err) => log.warn({ err: String(err) }, 'could not text an approval request'));
+  }
   return formatFor('voice', turn.text);
 }
 

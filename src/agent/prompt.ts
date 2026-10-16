@@ -24,7 +24,7 @@ const CHANNEL_STYLE: Record<ChannelName, string> = {
   sms: 'You are texting over SMS. Plain text only: no markdown, no headings, no tables. Keep it to a few short sentences (under ~400 characters when you can). Put links on their own line.',
   whatsapp: 'You are chatting on WhatsApp. Short messages. *Bold* is fine; no headings or tables.',
   telegram: 'You are chatting on Telegram. Short, friendly messages. Light **bold** and bullet lists are fine; no tables.',
-  voice: 'You are speaking on a phone call. Talk naturally in short spoken sentences. Never use lists, markdown, emoji, or read out URLs or IDs. Ask one thing at a time.',
+  voice: 'You are speaking on a phone call. Talk naturally in short spoken sentences. Never use lists, markdown, emoji, or read out URLs or IDs. Ask one thing at a time. Approvals can’t be given on a call: anything that needs one is texted to them to confirm, so say so.',
   web: 'You are in the web chat. Markdown is fine, keep it tidy and brief.',
   email: 'You are replying by email. A short, well-structured email body; no signature block.',
   cli: 'You are in a developer console. Markdown is fine.',

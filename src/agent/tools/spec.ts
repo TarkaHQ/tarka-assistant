@@ -37,11 +37,18 @@ export function defineTool<I>(spec: ToolSpec<I>): ToolSpec<I> {
 
 export type ApprovalRequester = (spec: ToolSpec, input: unknown, summary: string, ctx: ToolContext) => Promise<Record<string, unknown>>;
 
+/**
+ * Caller ID can be spoofed, so a phone call never gets tools that read email or documents, and it
+ * can't forget memories or hand out sign-in links.
+ */
+const VOICE_BLOCKED = /^(email_|drive_|memory_forget$|dashboard_link$|connect_google_link$|upgrade_link$)/;
+
 /** Converts our specs to AI SDK tools, routing approval-gated calls through `requestApproval`. */
 export function toAiTools(specs: ToolSpec[], ctx: ToolContext, requestApproval: ApprovalRequester, onCall?: (name: string, input: unknown) => void): ToolSet {
   const out: ToolSet = {};
   for (const spec of specs) {
     if (spec.available && !spec.available(ctx)) continue;
+    if (ctx.channel === 'voice' && VOICE_BLOCKED.test(spec.name)) continue;
     out[spec.name] = tool({
       description: spec.description,
       inputSchema: spec.input,

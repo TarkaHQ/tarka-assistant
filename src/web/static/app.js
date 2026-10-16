@@ -64,6 +64,10 @@
         var box = document.querySelector('[data-approvals-list]');
         if (box) box.innerHTML = data.approvalsHtml;
       }
+      if (data.upcomingHtml !== undefined) {
+        var up = document.querySelector('[data-upcoming-list]');
+        if (up) up.innerHTML = data.upcomingHtml;
+      }
     });
   }
 

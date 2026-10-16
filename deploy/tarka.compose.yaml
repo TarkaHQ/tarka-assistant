@@ -1,0 +1,213 @@
+# Tarka Assistant on a Tarka Agent Host.
+#
+# Four services: the assistant (web + worker in one process), Postgres with pgvector, Hindsight
+# (long-term memory, one bank per user, in its own schema of the same database) and a one-line
+# volume helper.
+#
+#   * Models: every service reaches Tarka's router at http://tarka/v1 with no key of its own;
+#     the host's gateway adds the identity. Naming "app" under the runtime's platform services
+#     also hands it TARKA_PRIMARY_MODEL and the utility models (speech-to-text, OCR, speech).
+#   * Containers hold no capabilities, so Postgres runs as its own user (999) instead of
+#     starting as root and switching. volume-init opens the fresh volume so it can create
+#     its data directory there.
+#   * Hindsight downloads two small multilingual models (~600 MB) on first start, into a
+#     volume so restarts are fast.
+#   * CPU limits add up to 3.6 of the core tier's 5, leaving room for each service's sandbox
+#     overhead and the certificate helper.
+#   * PUBLIC_URL must be this host's https address (https://<name>-<id>.tarka.site). Create
+#     the host, copy its address into the variable, then redeploy.
+
+x-tarka:
+  title: Tarka Assistant
+  description: An Instinct-style personal assistant people text (web, Telegram, SMS, WhatsApp, phone) with long-term memory from Hindsight.
+  tier: core
+  routes:
+    - service: app
+      port: 8080
+      path: /
+  variables:
+    - name: PUBLIC_URL
+      label: Public URL of this host
+      description: https://<name>-<id>.tarka.site — set after the first deploy.
+      required: true
+    - name: APP_SECRET
+      label: App secret
+      description: 32+ random characters. Encrypts OAuth tokens and signs links.
+      secret: true
+      required: true
+    - name: POSTGRES_PASSWORD
+      label: Database password
+      description: Letters and digits only.
+      secret: true
+      required: true
+    - name: SIGNUP_MODE
+      label: Sign-ups (open, invite or closed)
+      default_value: invite
+    - name: TELEGRAM_BOT_TOKEN
+      label: Telegram bot token
+      secret: true
+    - name: TELEGRAM_WEBHOOK_SECRET
+      label: Telegram webhook secret
+      secret: true
+    - name: TELNYX_API_KEY
+      label: Telnyx API key
+      secret: true
+    - name: TELNYX_PUBLIC_KEY
+      label: Telnyx webhook public key
+    - name: TELNYX_MESSAGING_PROFILE_ID
+      label: Telnyx messaging profile id
+    - name: TELNYX_PHONE_NUMBER
+      label: Telnyx phone number (E.164)
+    - name: TELNYX_WHATSAPP_NUMBER
+      label: WhatsApp number (E.164)
+    - name: TELNYX_CONCIERGE_ASSISTANT_ID
+      label: Telnyx assistant for outbound calls
+    - name: VOICE_LLM_SECRET
+      label: Secret Telnyx uses to call /voice/v1
+      secret: true
+    - name: GOOGLE_CLIENT_ID
+      label: Google OAuth client id
+    - name: GOOGLE_CLIENT_SECRET
+      label: Google OAuth client secret
+      secret: true
+    - name: BRAVE_API_KEY
+      label: Brave Search API key
+      secret: true
+    - name: BREVO_API_KEY
+      label: Brevo API key (sign-in emails)
+      secret: true
+    - name: STRIPE_SECRET_KEY
+      label: Stripe secret key
+      secret: true
+    - name: STRIPE_WEBHOOK_SECRET
+      label: Stripe webhook signing secret
+      secret: true
+    - name: STRIPE_PRICE_ID
+      label: Stripe price id for the monthly plan
+  runtime_profile:
+    managed_model: true
+    default_model_alias: qwen3.8-flash-next
+    utility_modalities: [stt, ocr, tts]
+    platform_services: [app]
+  volume_sizes:
+    db-data: 10Gi
+    hf-cache: 4Gi
+
+services:
+  app:
+    image: ghcr.io/tarkahq/tarka-assistant:latest
+    environment:
+      NODE_ENV: production
+      ROLE: all
+      PORT: "8080"
+      PUBLIC_URL: ${PUBLIC_URL}
+      APP_SECRET: ${APP_SECRET}
+      DATABASE_URL: postgres://assistant:${POSTGRES_PASSWORD}@db:5432/assistant
+      HINDSIGHT_URL: http://hindsight:8888
+      TARKA_BASE_URL: http://tarka/v1
+      SIGNUP_MODE: ${SIGNUP_MODE}
+      TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN}
+      TELEGRAM_WEBHOOK_SECRET: ${TELEGRAM_WEBHOOK_SECRET}
+      TELNYX_API_KEY: ${TELNYX_API_KEY}
+      TELNYX_PUBLIC_KEY: ${TELNYX_PUBLIC_KEY}
+      TELNYX_MESSAGING_PROFILE_ID: ${TELNYX_MESSAGING_PROFILE_ID}
+      TELNYX_PHONE_NUMBER: ${TELNYX_PHONE_NUMBER}
+      TELNYX_WHATSAPP_NUMBER: ${TELNYX_WHATSAPP_NUMBER}
+      TELNYX_CONCIERGE_ASSISTANT_ID: ${TELNYX_CONCIERGE_ASSISTANT_ID}
+      VOICE_LLM_SECRET: ${VOICE_LLM_SECRET}
+      GOOGLE_CLIENT_ID: ${GOOGLE_CLIENT_ID}
+      GOOGLE_CLIENT_SECRET: ${GOOGLE_CLIENT_SECRET}
+      BRAVE_API_KEY: ${BRAVE_API_KEY}
+      BREVO_API_KEY: ${BREVO_API_KEY}
+      STRIPE_SECRET_KEY: ${STRIPE_SECRET_KEY}
+      STRIPE_WEBHOOK_SECRET: ${STRIPE_WEBHOOK_SECRET}
+      STRIPE_PRICE_ID: ${STRIPE_PRICE_ID}
+    depends_on:
+      - db
+      - hindsight
+    healthcheck:
+      test: [CMD, node, -e, "fetch('http://127.0.0.1:8080/healthz').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+    deploy:
+      resources:
+        reservations: {cpus: "0.25", memory: 384M}
+        limits: {cpus: "1.0", memory: 1G}
+
+  db:
+    image: pgvector/pgvector:pg17
+    user: "999:999"
+    environment:
+      POSTGRES_USER: assistant
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: assistant
+      PGDATA: /var/lib/postgresql/data/pg
+    # Started as user 999, the stock entrypoint initialises the cluster without switching user.
+    command: [postgres, -c, shared_buffers=256MB, -c, max_connections=150]
+    expose: ["5432"]
+    volumes:
+      - db-data:/var/lib/postgresql/data
+    healthcheck:
+      test: [CMD-SHELL, pg_isready -U assistant -d assistant]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    deploy:
+      resources:
+        reservations: {cpus: "0.25", memory: 512M}
+        limits: {cpus: "1.0", memory: 1536M}
+
+  hindsight:
+    image: ghcr.io/vectorize-io/hindsight-api:1.0.0
+    environment:
+      # Same database as the app, in its own schema.
+      HINDSIGHT_API_DATABASE_URL: postgresql://assistant:${POSTGRES_PASSWORD}@db:5432/assistant
+      HINDSIGHT_API_DATABASE_SCHEMA: hindsight
+      HINDSIGHT_API_LLM_PROVIDER: openai
+      HINDSIGHT_API_LLM_BASE_URL: http://tarka/v1
+      HINDSIGHT_API_LLM_API_KEY: tarka-local
+      HINDSIGHT_API_LLM_MODEL: qwen3.8-flash-next
+      HINDSIGHT_API_RETAIN_MAX_COMPLETION_TOKENS: "16000"
+      HINDSIGHT_API_REFLECT_LLM_TIMEOUT: "120"
+      HINDSIGHT_API_EMBEDDINGS_PROVIDER: local
+      HINDSIGHT_API_EMBEDDINGS_LOCAL_MODEL: intfloat/multilingual-e5-small
+      HINDSIGHT_API_EMBEDDINGS_QUERY_PREFIX: "query: "
+      HINDSIGHT_API_EMBEDDINGS_PASSAGE_PREFIX: "passage: "
+      HINDSIGHT_API_RERANKER_PROVIDER: local
+      HINDSIGHT_API_RERANKER_LOCAL_MODEL: cross-encoder/mmarco-mMiniLMv2-L12-H384-v1
+      HINDSIGHT_API_RERANKER_MAX_CANDIDATES_LOW: "40"
+      HINDSIGHT_API_RERANKER_MAX_CANDIDATES_MID: "80"
+      HINDSIGHT_API_WORKER_ID: hindsight-1
+      HF_HOME: /cache/huggingface
+    expose: ["8888"]
+    depends_on:
+      - db
+    volumes:
+      - hf-cache:/cache
+    deploy:
+      resources:
+        reservations: {cpus: "0.5", memory: 1536M}
+        limits: {cpus: "1.5", memory: 3G}
+
+  volume-init:
+    image: busybox:1.37.0
+    user: "0"
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        chmod 0777 /db /cache || true
+        echo "[volume-init] $$(ls -ldn /db /cache)"
+        trap 'exit 0' TERM INT
+        while true; do sleep 3600 & wait $$!; done
+    volumes:
+      - db-data:/db
+      - hf-cache:/cache
+    deploy:
+      resources:
+        reservations: {cpus: "0.005", memory: 8M}
+        limits: {cpus: "0.05", memory: 32M}
+
+volumes:
+  db-data:
+  hf-cache:
