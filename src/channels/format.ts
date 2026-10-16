@@ -5,6 +5,22 @@ export function stripThinking(text: string): string {
   return text.replace(/<think>[\s\S]*?<\/think>/gi, '').replace(/^\s*<\/?think>\s*/gi, '').trim();
 }
 
+/**
+ * Chat-template control tokens that leaked into a reply: the serving side failed to turn the
+ * model's output into a tool call or a message (seen with Kimi K3 on Tarka, which sent
+ * `<|open|>tools<|sep|>…` as text). Such a reply must never reach the user.
+ */
+const LEAKED_TOKENS = /<\|[a-z_]{2,24}\|>|<｜[^｜\n]{1,40}｜>|<\/?tool_call>/;
+export function hasLeakedTokens(text: string): boolean {
+  return LEAKED_TOKENS.test(text);
+}
+
+/** The model's reply as it may be shown: thinking removed, and nothing if the output is garbled. */
+export function usableReply(text: string): string {
+  const t = stripThinking(text);
+  return hasLeakedTokens(t) ? '' : t;
+}
+
 /** Markdown → plain text for SMS and voice. Keeps link URLs visible. */
 export function toPlain(md: string): string {
   return md

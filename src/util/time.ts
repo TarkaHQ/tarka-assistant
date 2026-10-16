@@ -70,6 +70,33 @@ export function parseWhen(input: string, tz: string, now = new Date()): Date | n
   return dt.toJSDate();
 }
 
+/**
+ * One end of a time range ("what's on tomorrow", "free slots from Monday to Friday"). A day
+ * without a time ("tomorrow", "2026-10-20", "Friday") covers the whole day: as the start of a
+ * range it means the start of that day, as the end the end of it. Explicit times are kept as
+ * given. (parseWhen would read a bare day as 9 AM, so "from tomorrow to tomorrow" was empty.)
+ */
+export function parseRangeEdge(input: string, tz: string, edge: 'start' | 'end', now = new Date()): Date | null {
+  const zone = safeZone(tz);
+  const text = input.trim();
+  if (!text) return null;
+  const wholeDay = (d: DateTime) => (edge === 'start' ? d.startOf('day') : d.endOf('day')).toJSDate();
+  if (/^\d{4}-\d{2}-\d{2}$/.test(text)) {
+    const d = DateTime.fromISO(text, { zone });
+    return d.isValid ? wholeDay(d) : null;
+  }
+  if (/^\d{4}-\d{2}-\d{2}/.test(text)) return parseWhen(text, zone, now);
+  const localNow = DateTime.fromJSDate(now).setZone(zone);
+  const wallClock = new Date(Date.UTC(localNow.year, localNow.month - 1, localNow.day, localNow.hour, localNow.minute, localNow.second));
+  const first = chrono.parse(text, { instant: wallClock, timezone: 0 }, { forwardDate: true })[0];
+  if (!first) return null;
+  const relative = /\b(in|after)\s+(\d|an?\b|half\b|a few\b|couple)|\bfrom now\b/i.test(first.text);
+  if (relative || first.start.isCertain('hour')) return parseWhen(text, zone, now);
+  // "next week" parses as a span: its end edge is the end of the span.
+  const t = (edge === 'end' && first.end ? first.end : first.start).date();
+  return wholeDay(DateTime.fromObject({ year: t.getUTCFullYear(), month: t.getUTCMonth() + 1, day: t.getUTCDate() }, { zone }));
+}
+
 /** Next occurrence of a 5-field cron expression, evaluated in `tz`, strictly after `after`. */
 export function nextCronRun(cron: string, tz: string, after = new Date()): Date | null {
   try {

@@ -9,7 +9,7 @@ import { log } from '../log.js';
 import { chatModel, costMicroUsd } from '../models/tarka.js';
 import { approvalButtons, withApprovalNotice } from '../agent/approvals.js';
 import { runTurn } from '../agent/turn.js';
-import { formatFor } from '../channels/format.js';
+import { formatFor, usableReply } from '../channels/format.js';
 import { sendToUser } from '../channels/deliver.js';
 import { proactiveChannel } from '../proactive/scheduler.js';
 import { upgradeLink } from '../web/links.js';
@@ -153,7 +153,7 @@ async function conciergeReply(req: OAIRequest, callId: string, meta: Record<stri
     outputTokens: u.outputTokens ?? 0, costMicroUsd: costMicroUsd(model, u.inputTokens ?? 0, u.inputTokenDetails?.cacheReadTokens ?? 0, u.outputTokens ?? 0),
   });
   return {
-    text: formatFor('voice', res.text ?? ''),
+    text: formatFor('voice', usableReply(res.text ?? '')),
     toolCalls: res.toolCalls.map((tc) => ({ id: tc.toolCallId, name: tc.toolName, args: JSON.stringify(tc.input ?? {}) })),
   };
 }

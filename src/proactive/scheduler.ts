@@ -11,6 +11,7 @@ import { Google } from '../integrations/google.js';
 import { getScheduledEvent } from '../integrations/telnyx.js';
 import { enqueue } from '../jobs/queue.js';
 import { generateText } from 'ai';
+import { usableReply } from '../channels/format.js';
 import { chatModel, costMicroUsd } from '../models/tarka.js';
 import { usage } from '../db/repo.js';
 import { endOfQuiet, isQuiet, nextCronRun, safeZone, startOfLocalDay } from '../util/time.js';
@@ -203,7 +204,7 @@ async function summariseCall(user: User, objective: string, business: string, tr
     userId: user.id, purpose: 'voice', model, inputTokens: u.inputTokens ?? 0, cachedInputTokens: u.inputTokenDetails?.cacheReadTokens ?? 0,
     outputTokens: u.outputTokens ?? 0, costMicroUsd: costMicroUsd(model, u.inputTokens ?? 0, u.inputTokenDetails?.cacheReadTokens ?? 0, u.outputTokens ?? 0),
   });
-  return `📞 ${business}: ${res.text.trim()}`;
+  return `📞 ${business}: ${usableReply(res.text ?? '') || 'the call has ended, but I couldn’t write up how it went just now.'}`;
 }
 
 export type { Routine };

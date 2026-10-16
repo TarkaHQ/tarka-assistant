@@ -44,25 +44,25 @@ export interface ModelInfo {
 const KNOWN: Record<string, Omit<ModelInfo, 'id'>> = {
   'qwen3.8-flash-next': {
     label: 'Qwen 3.8 Flash',
-    blurb: 'Fast and capable. Served from Tarka’s own GPUs.',
+    blurb: 'Runs on Tarka’s own GPUs. Replies can be slow at busy times.',
     tier: 'standard',
     price: { in: 0, cached: 0, out: 0 },
   },
   'deepseek-v4.1-flash': {
     label: 'DeepSeek V4.1 Flash',
-    blurb: 'Strong reasoning at a low price.',
+    blurb: 'Quick, and dependable with tools. Low cost.',
     tier: 'standard',
     price: { in: 0.3, cached: 0.006, out: 1.2 },
   },
   'glm-5.3-flash': {
     label: 'GLM 5.3 Flash',
-    blurb: 'Cheapest option; good for everyday tasks.',
+    blurb: 'The cheapest option, and dependable for everyday tasks.',
     tier: 'standard',
     price: { in: 0.135, cached: 0.027, out: 0.45 },
   },
   'kimi-k3': {
     label: 'Kimi K3',
-    blurb: 'The most capable model on Tarka. Best for complex plans.',
+    blurb: 'The largest model here. Slower, and about ten times the price of DeepSeek.',
     tier: 'premium',
     price: { in: 2.7, cached: 0.27, out: 13.5 },
   },

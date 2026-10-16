@@ -1,8 +1,8 @@
 import { describe, expect, it } from 'vitest';
 import { generateKeyPairSync, sign } from 'node:crypto';
 import { DateTime } from 'luxon';
-import { parseWhen, nextCronRun, repeatToCron, describeCron, isQuiet, endOfQuiet, isValidTimezone, minCronGapMinutes } from '../src/util/time.js';
-import { toPlain, toTelegramHtml, splitMessage, stripThinking, toWhatsApp } from '../src/channels/format.js';
+import { parseWhen, parseRangeEdge, nextCronRun, repeatToCron, describeCron, isQuiet, endOfQuiet, isValidTimezone, minCronGapMinutes } from '../src/util/time.js';
+import { toPlain, toTelegramHtml, splitMessage, stripThinking, toWhatsApp, hasLeakedTokens, usableReply } from '../src/channels/format.js';
 import { renderMarkdown } from '../src/util/markdown.js';
 import { encrypt, decrypt, sealState, openState, shortCode, APPROVAL_CODE_ALPHABET, stableUuid } from '../src/util/crypto.js';
 import { parseTelnyxMessage } from '../src/channels/telnyx.js';
@@ -54,6 +54,18 @@ describe('time parsing', () => {
     expect(isValidTimezone('Asia/Kathmandu')).toBe(true);
     expect(isValidTimezone('Mars/Olympus')).toBe(false);
   });
+  it('reads a bare day as the whole day at either end of a range', () => {
+    const local = (d: Date | null) => DateTime.fromJSDate(d!).setZone(tz).toFormat('yyyy-LL-dd HH:mm');
+    // The calendar returned nothing for from "tomorrow" to "tomorrow": both used to mean 9am.
+    expect(local(parseRangeEdge('tomorrow', tz, 'start', now))).toBe('2026-10-17 00:00');
+    expect(local(parseRangeEdge('tomorrow', tz, 'end', now))).toBe('2026-10-17 23:59');
+    expect(local(parseRangeEdge('2026-10-17', tz, 'end', now))).toBe('2026-10-17 23:59');
+    expect(local(parseRangeEdge('today', tz, 'start', now))).toBe('2026-10-16 00:00');
+    expect(local(parseRangeEdge('tomorrow at 3pm', tz, 'end', now))).toBe('2026-10-17 15:00');
+    expect(local(parseRangeEdge('2026-10-17T08:30', tz, 'start', now))).toBe('2026-10-17 08:30');
+    expect(local(parseRangeEdge('in 2 hours', tz, 'end', now))).toBe('2026-10-16 11:00');
+    expect(parseRangeEdge('whenever', tz, 'start', now)).toBeNull();
+  });
 });
 
 describe('cron', () => {
@@ -92,6 +104,17 @@ describe('quiet hours', () => {
 describe('formatting', () => {
   it('strips leaked reasoning', () => {
     expect(stripThinking('<think>secret plan</think>Hello')).toBe('Hello');
+  });
+  it('never shows a reply with leaked chat-template tokens', () => {
+    // What Kimi K3 sent as text once, instead of a tool call.
+    const kimi = '<|open|>tools<|sep|><|open|>call tool="email_read" index="1"<|sep|><|open|>argument key="id" type="string"<|sep|>m1<|close|>argument<|sep|>';
+    expect(hasLeakedTokens(kimi)).toBe(true);
+    expect(usableReply(kimi)).toBe('');
+    expect(hasLeakedTokens('Sure.<|im_end|>')).toBe(true);
+    expect(hasLeakedTokens('<｜tool▁calls▁begin｜>')).toBe(true);
+    expect(hasLeakedTokens('<tool_call>{"name":"x"}</tool_call>')).toBe(true);
+    for (const ok of ['a <b> c', 'x || y', 'pipe | and <| alone', '5 < 6 > 4', 'Order #1042 — <3']) expect(hasLeakedTokens(ok)).toBe(false);
+    expect(usableReply('<think>hmm</think> Hi there')).toBe('Hi there');
   });
   it('converts markdown to plain SMS text', () => {
     expect(toPlain('**Bold** and [the site](https://x.com)\n- one\n- two')).toBe('Bold and the site (https://x.com)\n• one\n• two');

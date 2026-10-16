@@ -3,7 +3,7 @@ import { z } from 'zod';
 import { config } from '../../config.js';
 import { integrations } from '../../db/repo.js';
 import { Google } from '../../integrations/google.js';
-import { parseWhen, safeZone, shortLocal } from '../../util/time.js';
+import { parseRangeEdge, parseWhen, safeZone, shortLocal } from '../../util/time.js';
 import { defineTool, type ToolContext, type ToolSpec } from './spec.js';
 
 /** Google tools only appear once the user has connected Google. */
@@ -32,10 +32,19 @@ function fixTime(text: string | undefined, ctx: ToolContext, label: string): str
   return DateTime.fromJSDate(when(text, ctx, label)).setZone(zone(ctx)).toISO({ suppressMilliseconds: true })!;
 }
 
-function localRange(ctx: ToolContext, from?: string, to?: string) {
+function edge(text: string, ctx: ToolContext, which: 'start' | 'end'): Date {
+  const d = parseRangeEdge(text, zone(ctx), which, ctx.now);
+  if (!d) throw new Error(`Couldn't understand the ${which} "${text}"`);
+  return d;
+}
+
+/** A bare day covers the whole day, so from "tomorrow" to "tomorrow" is all of tomorrow. */
+export function localRange(ctx: ToolContext, from?: string, to?: string) {
   const tz = zone(ctx);
-  const start = from ? when(from, ctx, 'start') : DateTime.fromJSDate(ctx.now).setZone(tz).startOf('day').toJSDate();
-  const end = to ? when(to, ctx, 'end') : DateTime.fromJSDate(start).setZone(tz).plus({ days: 1 }).endOf('day').toJSDate();
+  const start = from ? edge(from, ctx, 'start') : DateTime.fromJSDate(ctx.now).setZone(tz).startOf('day').toJSDate();
+  let end = to ? edge(to, ctx, 'end') : DateTime.fromJSDate(start).setZone(tz).plus({ days: 1 }).endOf('day').toJSDate();
+  // An end at or before the start (both "tomorrow 9am", say): the rest of that day.
+  if (end <= start) end = DateTime.fromJSDate(start).setZone(tz).endOf('day').toJSDate();
   return { start, end };
 }
 

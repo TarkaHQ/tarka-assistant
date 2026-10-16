@@ -7,7 +7,7 @@ import { memory } from '../memory/hindsight.js';
 import { chatModel, costMicroUsd, modelInfo } from '../models/tarka.js';
 import { startOfLocalMonth } from '../util/time.js';
 import { sandboxesAvailable } from '../models/sandbox.js';
-import { stripThinking } from '../channels/format.js';
+import { hasLeakedTokens, usableReply } from '../channels/format.js';
 import { enqueue } from '../jobs/queue.js';
 import { buildInstructions, type Trigger } from './prompt.js';
 import { requestApproval } from './approvals.js';
@@ -250,8 +250,46 @@ export async function runTurn(input: TurnInput): Promise<TurnResult> {
   }
   if (!result) throw lastErr instanceof Error ? lastErr : new Error(String(lastErr));
 
+  // Some models now and then finish with an empty message, the answer left in their reasoning
+  // or a tool call lost on the way (Kimi K3 on Tarka did in about a third of tool loops in
+  // October 2026). Ask again, up to twice, from where it stopped, tools included: what already
+  // ran is in the history with its result, so the model carries on rather than starting over.
+  const retryUsage = { inputTokens: 0, cached: 0, outputTokens: 0 };
+  let retryText = '';
+  let retrySteps = 0;
+  // An empty or garbled reply (control tokens leaked as text) is asked again, never shown.
+  let lastEmpty = !usableReply(result.text ?? '') && (result.finishReason === 'stop' || hasLeakedTokens(result.text ?? ''));
+  let sofar = [...result.responseMessages]; // every step so far (result.response is only the last)
+  for (let attempt = 1; attempt <= 2 && lastEmpty && !input.abortSignal?.aborted; attempt++) {
+    if (sofar.at(-1)?.role === 'assistant') sofar = sofar.slice(0, -1); // the empty message
+    try {
+      const again = await generateText({
+        model: chatModel(usedModel),
+        instructions,
+        messages: [...modelMessages, ...sofar],
+        tools,
+        stopWhen: stepCountIs(cfg.models.maxSteps),
+        maxRetries: 1,
+        abortSignal: input.abortSignal,
+        timeout: { totalMs: input.channel === 'voice' ? 10_000 : 90_000 },
+        providerOptions: { tarka: { user: user.id } },
+      });
+      retryText = usableReply(again.text ?? '');
+      retrySteps += again.steps.length;
+      retryUsage.inputTokens += again.totalUsage.inputTokens ?? 0;
+      retryUsage.cached += again.totalUsage.inputTokenDetails?.cacheReadTokens ?? 0;
+      retryUsage.outputTokens += again.totalUsage.outputTokens ?? 0;
+      sofar = [...sofar, ...again.responseMessages];
+      lastEmpty = !retryText && (again.finishReason === 'stop' || hasLeakedTokens(again.text ?? ''));
+      log.info({ model: usedModel, user: user.id, attempt, recovered: Boolean(retryText) }, 'empty reply, asked again');
+    } catch (err) {
+      log.warn({ err: String(err), model: usedModel, user: user.id }, 'retry after empty reply failed');
+      break;
+    }
+  }
+
   // 5. Post-process.
-  let text = stripThinking(result.text ?? '');
+  let text = usableReply(result.text ?? '') || retryText;
   const silent = input.trigger !== 'message' && (NO_MESSAGE.test(text) || text === '');
   if (!text && !silent) {
     text = ctx.created.length ? 'I need your OK before I go ahead — see above.' : 'Done.';
@@ -259,9 +297,9 @@ export async function runTurn(input: TurnInput): Promise<TurnResult> {
   text = text.replace(/\bNO_MESSAGE\b/g, '').trim();
 
   const totalUsage = result.totalUsage;
-  const inputTokens = totalUsage.inputTokens ?? 0;
-  const cached = totalUsage.inputTokenDetails?.cacheReadTokens ?? 0;
-  const outputTokens = totalUsage.outputTokens ?? 0;
+  const inputTokens = (totalUsage.inputTokens ?? 0) + retryUsage.inputTokens;
+  const cached = (totalUsage.inputTokenDetails?.cacheReadTokens ?? 0) + retryUsage.cached;
+  const outputTokens = (totalUsage.outputTokens ?? 0) + retryUsage.outputTokens;
   const cost = costMicroUsd(usedModel, inputTokens, cached, outputTokens);
   const trace: TurnTrace = {
     model: usedModel,
@@ -272,7 +310,7 @@ export async function runTurn(input: TurnInput): Promise<TurnResult> {
     latencyMs: Date.now() - started,
     memoryMs: recalled.ms,
     memoriesUsed: recalled.items.length,
-    steps: result.steps.length,
+    steps: result.steps.length + retrySteps,
     tools: toolsUsed,
   };
 

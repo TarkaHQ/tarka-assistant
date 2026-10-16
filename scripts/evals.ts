@@ -8,6 +8,7 @@
  *   npm run eval -- --models qwen3.8-flash-next --only reminder  # a subset
  *   npm run eval -- --repeat 3 --out eval-report.md
  *   npm run eval -- --memory                                     # also the Hindsight scenario
+ *   npm run eval -- --only calendar --verbose                    # print every message and tool call
  *
  * Uses its own database (EVAL_DATABASE_URL, default assistant_eval on the dev Postgres) and
  * resets it on every run. Nothing is sent anywhere real except model calls (and Open-Meteo).
@@ -24,6 +25,7 @@ const { values: args } = parseArgs({
     repeat: { type: 'string', default: '1' },
     out: { type: 'string' },
     memory: { type: 'boolean', default: false },
+    verbose: { type: 'boolean', default: false },
   },
 });
 
@@ -171,6 +173,11 @@ globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) =>
     return json({ id: 'd1', message: { id: 'dm1' } });
   }
   if (url.startsWith('https://people.googleapis.com/')) return json({ results: [] });
+  if (url.startsWith('https://www.googleapis.com/drive/v3/files?')) {
+    return json({ files: [{ id: 'f1', name: 'Q4 deck', mimeType: 'application/vnd.google-apps.presentation', modifiedTime: new Date(Date.now() - 86_400_000).toISOString(), webViewLink: 'https://docs.google.com/presentation/d/f1' }] });
+  }
+  // Nothing else of Google's is reachable from the evals: a test that wanders off fails loudly.
+  if (/googleapis\.com/.test(url)) return new Response(JSON.stringify({ error: { message: `not faked in evals: ${url.split('?')[0]}` } }), { status: 404 });
   return realFetch(input as string, init);
 }) as typeof fetch;
 
@@ -296,7 +303,7 @@ const scenarios: Scenario[] = [
     google: true,
     run: async ({ say, check, user }) => {
       const before = google.sends.length;
-      const r = await say('email sam@example.com to say the deck is attached and that I’ll call him tomorrow');
+      const r = await say('email sam@example.com to say thanks for the nudge, I’ll send the deck tonight and call him tomorrow at 10am');
       const pending = await approvals.pending((await user()).id);
       check('holds the email for approval', pending.length === 1 && pending[0]!.tool === 'email_send', pending.map((p) => p.tool).join(','));
       check('to Sam', pending[0] ? JSON.stringify(pending[0].input).includes('sam@example.com') : false);
@@ -414,6 +421,7 @@ async function runScenario(s: Scenario, model: string): Promise<{ checks: Check[
     check: (name, pass, detail) => checks.push({ name, pass, detail }),
     say: async (text, opts = {}) => {
       const res = await handleInbound({ channel: 'sms', externalId: phone, text, receivedAt: (opts.receivedAt ?? new Date()).toISOString(), country: 'DE' });
+      if (args.verbose) console.log(`    you> ${text}\n    tools: ${(res.turn?.trace.tools ?? []).join(', ') || '(none)'}\n    bot> ${(res.reply ?? '').replace(/\n/g, '\n         ')}`);
       return { reply: res.reply ?? '', tools: res.turn?.trace.tools ?? [] };
     },
     user: async () => {

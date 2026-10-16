@@ -638,6 +638,135 @@ describe('accounts and channels', () => {
       clearModel();
     }
   });
+
+  it('asks once more when the model ends with an empty message, keeping what ran', async () => {
+    const user = await makeUser({ phone: '+4915100000117' });
+    const { MockLanguageModelV4 } = await import('ai/test');
+    const { setModelOverride } = await import('../src/models/tarka.js');
+    const usage = { inputTokens: { total: 10, noCache: 10, cacheRead: 0, cacheWrite: undefined }, outputTokens: { total: 5, text: 5, reasoning: undefined } };
+    const calls: { toolChoice: unknown; prompt: string }[] = [];
+    setModelOverride(() =>
+      new MockLanguageModelV4({
+        doGenerate: async (options) => {
+          calls.push({ toolChoice: options.toolChoice, prompt: JSON.stringify(options.prompt) });
+          if (calls.length === 1) {
+            return {
+              content: [{ type: 'tool-call', toolCallId: 'c1', toolName: 'schedule_reminder', input: JSON.stringify({ text: 'Call Mum', when: 'tomorrow 6pm' }) }],
+              finishReason: { unified: 'tool-calls', raw: undefined },
+              usage,
+              warnings: [],
+            };
+          }
+          if (calls.length === 2) {
+            // What Kimi K3 sometimes does: the answer stays in the reasoning, the message is empty.
+            return { content: [{ type: 'reasoning', text: 'Reminder is set, tell her.' }], finishReason: { unified: 'stop', raw: 'stop' }, usage, warnings: [] };
+          }
+          return { content: [{ type: 'text', text: 'Done: I’ll remind you to call Mum tomorrow at 6 PM.' }], finishReason: { unified: 'stop', raw: 'stop' }, usage, warnings: [] };
+        },
+      }),
+    );
+    try {
+      const r = await handleInbound(sms('+4915100000117', 'remind me to call mum tomorrow at 6'));
+      expect(r.reply).toMatch(/remind you to call Mum/);
+      expect(calls).toHaveLength(3);
+      expect(calls[2]!.prompt).toContain('"role":"tool"'); // it carries on from what the tool did
+      expect(await routines.byKind(user.id, 'reminder')).toHaveLength(1); // the tool ran once
+      expect(r.turn?.trace.outputTokens).toBe(15); // the retry is counted
+    } finally {
+      clearModel();
+    }
+  });
+
+  it('asks a second time if the first retry is empty too, then gives up politely', async () => {
+    const user = await makeUser({ phone: '+4915100000119' });
+    const { MockLanguageModelV4 } = await import('ai/test');
+    const { setModelOverride } = await import('../src/models/tarka.js');
+    const usage = { inputTokens: { total: 10, noCache: 10, cacheRead: 0, cacheWrite: undefined }, outputTokens: { total: 5, text: 5, reasoning: undefined } };
+    let n = 0;
+    const empty = () => ({ content: [{ type: 'reasoning' as const, text: '…' }], finishReason: { unified: 'stop' as const, raw: 'stop' }, usage, warnings: [] });
+    setModelOverride(() =>
+      new MockLanguageModelV4({
+        doGenerate: async () => {
+          n++;
+          if (n === 1) {
+            return {
+              content: [{ type: 'tool-call', toolCallId: 'c1', toolName: 'schedule_reminder', input: JSON.stringify({ text: 'Call Mum', when: 'tomorrow 6pm' }) }],
+              finishReason: { unified: 'tool-calls', raw: undefined },
+              usage,
+              warnings: [],
+            };
+          }
+          if (n < 4) return empty();
+          return { content: [{ type: 'text', text: 'Set: Call Mum, tomorrow 6 PM.' }], finishReason: { unified: 'stop', raw: 'stop' }, usage, warnings: [] };
+        },
+      }),
+    );
+    try {
+      const r = await handleInbound(sms('+4915100000119', 'remind me to call mum tomorrow at 6'));
+      expect(r.reply).toBe('Set: Call Mum, tomorrow 6 PM.');
+      expect(n).toBe(4); // the loop, then two retries
+      expect(await routines.byKind(user.id, 'reminder')).toHaveLength(1);
+    } finally {
+      clearModel();
+    }
+  });
+
+  it('never sends leaked template tokens; asks again instead', async () => {
+    await makeUser({ phone: '+4915100000120' });
+    const { MockLanguageModelV4 } = await import('ai/test');
+    const { setModelOverride } = await import('../src/models/tarka.js');
+    const usage = { inputTokens: { total: 10, noCache: 10, cacheRead: 0, cacheWrite: undefined }, outputTokens: { total: 5, text: 5, reasoning: undefined } };
+    let n = 0;
+    setModelOverride(() =>
+      new MockLanguageModelV4({
+        doGenerate: async () => {
+          n++;
+          const text = n === 1 ? '<|open|>tools<|sep|><|open|>call tool="lists_show" index="1"<|sep|>' : 'Your list is empty.';
+          return { content: [{ type: 'text', text }], finishReason: { unified: 'stop', raw: 'stop' }, usage, warnings: [] };
+        },
+      }),
+    );
+    try {
+      const r = await handleInbound(sms('+4915100000120', "what's on my list?"));
+      expect(r.reply).toBe('Your list is empty.');
+      expect(n).toBe(2);
+    } finally {
+      clearModel();
+    }
+  });
+
+  it('lets the model use its tools on the retry when nothing ran the first time', async () => {
+    const user = await makeUser({ phone: '+4915100000118' });
+    const { MockLanguageModelV4 } = await import('ai/test');
+    const { setModelOverride } = await import('../src/models/tarka.js');
+    const usage = { inputTokens: { total: 10, noCache: 10, cacheRead: 0, cacheWrite: undefined }, outputTokens: { total: 5, text: 5, reasoning: undefined } };
+    const calls: { toolChoice: unknown }[] = [];
+    setModelOverride(() =>
+      new MockLanguageModelV4({
+        doGenerate: async (options) => {
+          calls.push({ toolChoice: options.toolChoice });
+          if (calls.length === 1) return { content: [{ type: 'reasoning', text: 'I should set a reminder.' }], finishReason: { unified: 'stop', raw: 'stop' }, usage, warnings: [] };
+          if (calls.length === 2) {
+            return {
+              content: [{ type: 'tool-call', toolCallId: 'c1', toolName: 'schedule_reminder', input: JSON.stringify({ text: 'Call Mum', when: 'tomorrow 6pm' }) }],
+              finishReason: { unified: 'tool-calls', raw: undefined },
+              usage,
+              warnings: [],
+            };
+          }
+          return { content: [{ type: 'text', text: 'Done: I’ll remind you to call Mum tomorrow at 6 PM.' }], finishReason: { unified: 'stop', raw: 'stop' }, usage, warnings: [] };
+        },
+      }),
+    );
+    try {
+      const r = await handleInbound(sms('+4915100000118', 'remind me to call mum tomorrow at 6'));
+      expect(r.reply).toMatch(/remind you to call Mum/);
+      expect(calls).toHaveLength(3);
+      expect(await routines.byKind(user.id, 'reminder')).toHaveLength(1);
+    } finally {
+      clearModel();
+    }
+  });
 });
 
 describe('second review: approvals, schedules and links', () => {
