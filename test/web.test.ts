@@ -7,7 +7,7 @@ import { createApp } from '../src/web/server.js';
 import { connectGoogleLink, dashboardLink } from '../src/web/links.js';
 import { captureChannels, makeUser, resetDb } from './helpers.js';
 
-captureChannels();
+const sent = captureChannels();
 const realFetch = globalThis.fetch;
 let stripeOk = true;
 const stripeCalls: string[] = [];
@@ -48,6 +48,7 @@ afterAll(async () => {
   await closeDb();
 });
 beforeEach(async () => {
+  sent.length = 0;
   stripeOk = true;
   stripeCalls.length = 0;
   await db().unsafe('truncate users cascade; truncate login_tokens; truncate kv;');
@@ -68,7 +69,10 @@ describe('sign-in links', () => {
     for (let i = 0; i < 2; i++) {
       const page = await app.request(path);
       expect(page.status).toBe(200);
-      expect(await page.text()).toContain('Priya');
+      const html = await page.text();
+      // Named by something its owner can't edit, not by the free-text name.
+      expect(html).toContain('the phone number ending 0200');
+      expect(html).not.toContain('Priya');
     }
     const signIn = await app.request(path, form({ next: '/app' }));
     expect(signIn.status).toBe(302);
@@ -106,15 +110,38 @@ describe('sign-in links', () => {
 describe('connecting Google', () => {
   async function startFromChatLink(app: ReturnType<typeof createApp>, phone: string) {
     const user = await makeUser({ phone });
-    const path = new URL(await connectGoogleLink(user)).pathname + new URL(await connectGoogleLink(user)).search;
-    const page = await (await app.request(path)).text();
+    const link = new URL(await connectGoogleLink(user));
+    const page = await (await app.request(link.pathname + link.search)).text();
     expect(page).toContain('Connect Google');
-    const res = await app.request(path.split('?')[0]!, form({ next: '/oauth/google/connect' }));
+    const signIn = await app.request(link.pathname, form({ next: '/oauth/google/connect' }));
+    expect(signIn.status).toBe(200);
+    expect(await signIn.text()).toContain('Confirm it’s you');
+    const session = cookiesOf(signIn);
+    // The code went to the account's own chat (here: SMS), not to the page.
+    const msg = sent.at(-1)!;
+    expect(msg.to).toBe(phone);
+    const code = /\d{6}/.exec(msg.msg.text)![0];
+    const res = await app.request('/oauth/google/start', { ...form({ code }), headers: { 'Content-Type': 'application/x-www-form-urlencoded', Cookie: session } });
     expect(res.status).toBe(302);
     const google = new URL(res.headers.get('location')!);
     expect(google.origin).toBe('https://accounts.google.com');
-    return { user, cookies: cookiesOf(res), state: google.searchParams.get('state')! };
+    return { user, cookies: [session, cookiesOf(res)].filter(Boolean).join('; '), state: google.searchParams.get('state')! };
   }
+
+  it('needs the code from the account’s own chat, so a forwarded link is not enough', async () => {
+    const app = createApp();
+    const attacker = await makeUser({ phone: '+4915100000213' });
+    const link = new URL(await connectGoogleLink(attacker));
+    // The victim opens the forwarded link and clicks through…
+    const signIn = await app.request(link.pathname, form({ next: '/oauth/google/connect' }));
+    const html = await signIn.text();
+    expect(html).not.toMatch(/\b\d{6}\b/); // the code is not on the page
+    expect(sent.at(-1)!.to).toBe('+4915100000213'); // it went to the account holder's own phone
+    // …but without that code nothing starts.
+    const res = await app.request('/oauth/google/start', { ...form({ code: '000000' }), headers: { 'Content-Type': 'application/x-www-form-urlencoded', Cookie: cookiesOf(signIn) } });
+    expect(res.status).toBe(400);
+    expect(res.headers.get('location')).toBeNull();
+  });
 
   it('completes for the browser that started it', async () => {
     const app = createApp();

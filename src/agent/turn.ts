@@ -24,6 +24,8 @@ export interface TurnInput {
   title?: string;
   /** Persist `text` as the user's message (true for real messages). */
   persistUserMessage?: boolean;
+  /** The user's message is already stored (a retried job): use this row instead of adding one. */
+  existingUserMessageId?: number;
   userMeta?: Record<string, unknown>;
   onStatus?: (label: string) => void;
   progress?: (text: string) => Promise<void>;
@@ -116,9 +118,10 @@ export async function runTurn(input: TurnInput): Promise<TurnResult> {
   // 1. Gather context in parallel (none of it for an unverified caller).
   const historyP = restricted ? Promise.resolve([] as MessageRow[]) : messages.recent(user.id, HISTORY_ROWS);
   let userMessage: MessageRow | undefined;
-  if (input.persistUserMessage && !restricted) {
+  if (input.persistUserMessage && !restricted && !input.existingUserMessageId) {
     userMessage = await messages.add(user.id, 'user', input.channel, input.text, input.userMeta ?? {});
   }
+  const userMessageId = userMessage?.id ?? input.existingUserMessageId;
   const memoryQuery = input.trigger === 'message' ? input.text : `${input.title ?? input.trigger} ${input.text}`.slice(0, 1000);
   const [history, recalled, upcoming, pending, googleConnected, integ, profile] = await Promise.all([
     historyP,
@@ -131,7 +134,7 @@ export async function runTurn(input: TurnInput): Promise<TurnResult> {
   ]);
 
   // 2. Messages: prior conversation, then this turn.
-  const prior = restricted ? restricted.history : historyToMessages(history.filter((m) => m.id !== userMessage?.id));
+  const prior = restricted ? restricted.history : historyToMessages(history.filter((m) => m.id !== userMessageId));
   let finalUser: string;
   switch (input.trigger) {
     case 'message':
@@ -156,6 +159,8 @@ export async function runTurn(input: TurnInput): Promise<TurnResult> {
     user,
     channel: input.channel,
     now,
+    trigger: input.trigger,
+    restricted: Boolean(restricted),
     progress: input.progress,
     activity: [],
     created: [],
@@ -285,7 +290,7 @@ export async function runTurn(input: TurnInput): Promise<TurnResult> {
       assistantText: text,
       channel: input.channel,
       at: now.toISOString(),
-      documentId: `msg-${userMessage?.id ?? messageId ?? Date.now()}`,
+      documentId: `msg-${userMessageId ?? messageId ?? Date.now()}`,
     }).catch((err) => log.warn({ err: String(err) }, 'could not queue memory retain'));
   }
 

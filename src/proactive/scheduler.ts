@@ -39,7 +39,7 @@ function planAllows(user: User): boolean {
   return !user.trial_ends_at || user.trial_ends_at.getTime() > Date.now();
 }
 
-export async function runRoutine(routineId: string, userId: string): Promise<void> {
+export async function runRoutine(routineId: string, userId: string, signal?: AbortSignal): Promise<void> {
   const user = await users.get(userId);
   const routine = user ? await routines.get(userId, routineId) : null;
   if (!user || !routine || !planAllows(user)) return;
@@ -49,13 +49,26 @@ export async function runRoutine(routineId: string, userId: string): Promise<voi
   if (user.status !== 'active' && !(user.status === 'onboarding' && own)) return;
   if (routine.status === 'cancelled' || routine.status === 'paused') return;
 
+  const cfg = config();
+  const day = DateTime.now().setZone(safeZone(user.timezone)).toISODate();
+
   if (routine.kind === 'reminder') {
+    // A ceiling on reminder texts per day, so no schedule (or planted reminder) can flood someone.
+    const sent = await kv.incr(`reminders-sent:${user.id}:${day}`);
+    if (sent > cfg.limits.remindersPerDay) {
+      if (sent === cfg.limits.remindersPerDay + 1) {
+        await sendToUser(user, `That's ${cfg.limits.remindersPerDay} reminders today, the daily limit, so I'm holding the rest until tomorrow. You can tidy them up in the dashboard.`, {
+          proactive: true,
+          persist: { role: 'assistant', meta: { source: 'system' } },
+        });
+      }
+      return;
+    }
     // Reminders are the user's own request: they fire on time, quiet hours or not.
     await sendToUser(user, `⏰ Reminder: ${routine.title}`, { proactive: true, persist: { role: 'assistant', meta: { source: 'reminder', routine: routine.id } } });
     return;
   }
 
-  const cfg = config();
   // PROACTIVE_ENABLED is the operator's switch for every agent-initiated turn; the user's own
   // "proactivity: off" stops the brief and check-ins but not tasks they asked for.
   if (!cfg.proactive.enabled) return;
@@ -63,7 +76,6 @@ export async function runRoutine(routineId: string, userId: string): Promise<voi
 
   if (routine.kind === 'task' || routine.kind === 'followup') {
     // Each run is a full agent turn: a daily ceiling keeps a runaway schedule from burning money.
-    const day = DateTime.now().setZone(safeZone(user.timezone)).toISODate();
     const runs = await kv.incr(`task-runs:${user.id}:${day}`);
     if (runs > cfg.limits.taskRunsPerDay) {
       if (runs === cfg.limits.taskRunsPerDay + 1) {
@@ -96,7 +108,7 @@ export async function runRoutine(routineId: string, userId: string): Promise<voi
 
   const channel = await proactiveChannel(user);
   const trigger = routine.kind === 'brief' ? 'brief' : routine.kind === 'checkin' ? 'checkin' : 'routine';
-  const turn = await runTurn({ user, channel, text: routine.instructions ?? routine.title, title: routine.title, trigger });
+  const turn = await runTurn({ user, channel, text: routine.instructions ?? routine.title, title: routine.title, trigger, abortSignal: signal });
   if (turn.silent) {
     await audit.add(user.id, 'agent', `${routine.kind}.skipped`, { routine: routine.id, reason: 'nothing worth sending' });
     return;

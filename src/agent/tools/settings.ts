@@ -1,6 +1,7 @@
 import { z } from 'zod';
 import { config } from '../../config.js';
-import { integrations, users } from '../../db/repo.js';
+import { integrations, messages, users } from '../../db/repo.js';
+import { sendToUser } from '../../channels/deliver.js';
 import type { UserSettings } from '../../db/types.js';
 import { memory } from '../../memory/hindsight.js';
 import { syncSystemRoutines } from '../../proactive/system-routines.js';
@@ -80,23 +81,38 @@ export const settingsTools: ToolSpec[] = [
     },
   }),
 
+  // Sign-in links are sent to the person by code, as their own message. The model never sees them
+  // (a page or email it reads can't talk it into passing one on), and they never enter the
+  // conversation history.
   defineTool({
     name: 'dashboard_link',
-    label: 'Making a sign-in link',
-    description: 'Create a one-time link that signs the user into their web dashboard (memory, reminders, activity, usage, settings). Valid 30 minutes.',
+    label: 'Sending a sign-in link',
+    description: 'Send the user a one-time link (valid 30 minutes) that signs them into their web dashboard: memory, reminders, activity, usage, settings. It arrives as a separate message.',
     input: z.object({}),
-    run: async (_i, ctx) => ({ url: await dashboardLink(ctx.user), expires_in_minutes: 30 }),
+    available: (ctx) => ctx.trigger === 'message',
+    run: async (_i, ctx) => {
+      if (ctx.channel === 'web' || ctx.channel === 'cli') return { already_signed_in: true, note: 'They are using the web dashboard right now; point them to the tabs at the top.' };
+      const url = await dashboardLink(ctx.user);
+      await sendToUser(ctx.user, `Here’s your dashboard (the link works once, for 30 minutes):\n${url}`, { channel: ctx.channel });
+      await messages.add(ctx.user.id, 'event', ctx.channel, 'Sent the user a one-time sign-in link to the dashboard.');
+      return { sent: true, note: 'The link was sent as its own message just now. Do not write a URL yourself.' };
+    },
   }),
 
   defineTool({
     name: 'connect_google_link',
-    label: 'Making a Google link',
-    description: 'Create a link the user opens to connect their Google account (Gmail, Calendar, Drive, Contacts) so you can read their calendar and email and draft or send on their behalf.',
+    label: 'Sending a Google link',
+    description: 'Send the user a link to connect their Google account (Gmail, Calendar, Drive, Contacts) so you can read their calendar and email and draft or send on their behalf. It arrives as a separate message; they confirm with a code sent here.',
     input: z.object({}),
-    available: () => config().google.enabled,
+    available: (ctx) => config().google.enabled && ctx.trigger === 'message',
     run: async (_i, ctx) => {
       const existing = await integrations.get(ctx.user.id, 'google');
-      return { url: await connectGoogleLink(ctx.user), expires_in_minutes: 30, already_connected: existing?.status === 'active' ? existing.account : null };
+      if (existing?.status === 'active') return { already_connected: existing.account };
+      if (ctx.channel === 'web' || ctx.channel === 'cli') return { sent: false, note: 'They are on the web dashboard: they can connect Google under Settings.' };
+      const url = await connectGoogleLink(ctx.user);
+      await sendToUser(ctx.user, `Connect your Google account here (the link works once, for 30 minutes):\n${url}`, { channel: ctx.channel });
+      await messages.add(ctx.user.id, 'event', ctx.channel, 'Sent the user a link to connect Google.');
+      return { sent: true, note: 'The link was sent as its own message just now. Do not write a URL yourself.' };
     },
   }),
 

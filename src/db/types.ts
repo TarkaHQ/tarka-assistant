@@ -96,6 +96,8 @@ export interface Approval {
   summary: string;
   status: 'pending' | 'approved' | 'rejected' | 'expired' | 'executed' | 'failed';
   channel: ChannelName | null;
+  /** 'message' when the person asked for it; otherwise the unprompted trigger (routine, brief…). */
+  origin: string;
   result: unknown;
   created_at: Date;
   expires_at: Date;

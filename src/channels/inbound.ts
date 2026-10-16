@@ -110,7 +110,15 @@ async function enrichWithMedia(msg: InboundMessage): Promise<{ text: string; had
  * Handles one inbound message end to end: identity, sign-up, approvals, media, the agent turn and
  * the reply. Never throws (a failed job would block this conversation's queue).
  */
-export async function handleInbound(msg: InboundMessage, opts: { onStatus?: (label: string) => void } = {}): Promise<InboundResult> {
+export interface InboundOptions {
+  onStatus?: (label: string) => void;
+  /** Aborted when the job expires or the worker shuts down (the job is then retried). */
+  signal?: AbortSignal;
+  /** This job ran before and didn't finish (worker restart): don't answer the same message twice. */
+  retry?: boolean;
+}
+
+export async function handleInbound(msg: InboundMessage, opts: InboundOptions = {}): Promise<InboundResult> {
   const cfg = config();
   try {
     let identity = await identities.find(msg.channel, msg.externalId);
@@ -188,6 +196,16 @@ export async function handleInbound(msg: InboundMessage, opts: { onStatus?: (lab
     let user = (await users.get(identity.user_id))!;
     if (user.status === 'deleted' || user.status === 'paused') return { userId: user.id };
 
+    // A retried job: if this message was already answered, stop; if it was stored but not
+    // answered, answer it without storing it a second time.
+    let existingUserMessageId: number | undefined;
+    if (opts.retry && msg.providerMessageId) {
+      const prev = await messages.byProviderMessageId(user.id, msg.providerMessageId);
+      if (prev && (await messages.hasAssistantAfter(user.id, prev.id))) return { userId: user.id };
+      existingUserMessageId = prev?.id;
+    }
+    const userMeta = { providerMessageId: msg.providerMessageId, media: (msg.media ?? []).map((m) => m.kind) };
+
     // Approval buttons and yes/no replies are decided deterministically, never by the model.
     if (msg.command?.name === 'approval' && msg.command.arg) {
       const [id, d] = msg.command.arg.split(':');
@@ -195,15 +213,17 @@ export async function handleInbound(msg: InboundMessage, opts: { onStatus?: (lab
       await sendToUser(user, outcome.message, { channel: msg.channel, persist: { role: 'assistant', meta: { source: 'approval' } } });
       return { userId: user.id, reply: outcome.message };
     }
-    const match = await matchApprovalReply(user, msg.text);
+    // When the person sent it, by our clock: a "yes" typed before a request existed never approves it.
+    const sentAt = new Date(msg.queuedAt ?? msg.receivedAt);
+    const match = await matchApprovalReply(user, msg.text, Number.isNaN(sentAt.getTime()) ? new Date() : sentAt);
     if (match?.kind === 'decision') {
-      await messages.add(user.id, 'user', msg.channel, msg.text);
+      if (!existingUserMessageId) await messages.add(user.id, 'user', msg.channel, msg.text, userMeta);
       const outcome = await decideApprovals(user, match.approvals, match.decision, msg.channel);
       await sendToUser(user, outcome.message, { channel: msg.channel, persist: { role: 'assistant', meta: { source: 'approval' } } });
       return { userId: user.id, reply: outcome.message };
     }
     if (match?.kind === 'clarify') {
-      await messages.add(user.id, 'user', msg.channel, msg.text);
+      if (!existingUserMessageId) await messages.add(user.id, 'user', msg.channel, msg.text, userMeta);
       const reply = clarifyMessage(match.pending, match.decision);
       await sendToUser(user, reply, { channel: msg.channel, persist: { role: 'assistant', meta: { source: 'approval', approvals: match.pending.map((a) => a.id) } } });
       return { userId: user.id, reply };
@@ -221,7 +241,9 @@ export async function handleInbound(msg: InboundMessage, opts: { onStatus?: (lab
 
     if (/^\/?(dashboard|login)$/i.test(msg.text.trim())) {
       const reply = `Here's your dashboard (link works once, for 30 minutes):\n${await dashboardLink(user)}`;
-      await sendToUser(user, reply, { channel: msg.channel, persist: { role: 'assistant' } });
+      // The link itself is never stored in the conversation (the model reads that history).
+      await sendToUser(user, reply, { channel: msg.channel });
+      await messages.add(user.id, 'event', msg.channel, 'Sent the user a one-time sign-in link to the dashboard.');
       return { userId: user.id, reply };
     }
 
@@ -234,8 +256,10 @@ export async function handleInbound(msg: InboundMessage, opts: { onStatus?: (lab
       text,
       trigger: 'message',
       persistUserMessage: true,
-      userMeta: { providerMessageId: msg.providerMessageId, media: (msg.media ?? []).map((m) => m.kind) },
+      existingUserMessageId,
+      userMeta,
       onStatus: opts.onStatus,
+      abortSignal: opts.signal,
       progress: async (p) => {
         await sendToUser(user, p, { channel: msg.channel });
       },
@@ -251,6 +275,11 @@ export async function handleInbound(msg: InboundMessage, opts: { onStatus?: (lab
     await sendToUser(user, outgoing, { channel: msg.channel, buttons: approvalButtons(turn.approvals), audio });
     return { userId: user.id, reply: outgoing, turn };
   } catch (err) {
+    if (opts.signal?.aborted) {
+      // The worker is stopping or the job ran out of time: the retry will answer, no apology now.
+      log.warn({ channel: msg.channel }, 'inbound handling aborted; it will be retried');
+      return {};
+    }
     log.error({ err: err instanceof Error ? err.stack : String(err), channel: msg.channel }, 'inbound handling failed');
     const identity = await identities.find(msg.channel, msg.externalId).catch(() => null);
     const sorry = 'Sorry — something went wrong on my side. Please try again in a minute.';

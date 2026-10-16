@@ -768,7 +768,7 @@ export const SettingsPage: FC<SettingsProps> = ({ user, googleEnabled, googleAcc
                 ) : (
                   <>
                     <p>Connect Gmail, Calendar, Drive and Contacts so it can plan your day, draft replies and book time.</p>
-                    <form method="post" action="/oauth/google/start" style="margin-top:12px">
+                    <form method="post" action="/oauth/google/code" style="margin-top:12px">
                       <button class="btn small" type="submit">
                         Connect Google
                       </button>
@@ -790,7 +790,7 @@ export const SettingsPage: FC<SettingsProps> = ({ user, googleEnabled, googleAcc
                   <form id="voice-pin-form" style="margin-top:12px">
                     <div class="field">
                       <label for="voice_pin">{s.voicePin ? 'Change voice PIN' : 'Voice PIN'}</label>
-                      <input id="voice_pin" name="voice_pin" type="password" inputmode="numeric" autocomplete="off" pattern="\d{4,8}" placeholder="4 to 8 digits" />
+                      <input id="voice_pin" name="voice_pin" type="password" inputmode="numeric" autocomplete="off" pattern="\d{6,8}" placeholder="6 to 8 digits" />
                       <p class="hint">{s.voicePin ? 'A PIN is set.' : 'No PIN yet.'} Never use your bank PIN.</p>
                     </div>
                     <label class="row" style="font-weight:500">

@@ -177,6 +177,20 @@ export const messages = {
     return row?.n ?? 0;
   },
 
+  /** A user message by the channel's message id (to recognise a retried job). */
+  async byProviderMessageId(userId: string, providerMessageId: string): Promise<MessageRow | null> {
+    const [row] = await db()<MessageRow[]>`
+      select * from messages where user_id = ${userId} and role = 'user' and meta->>'providerMessageId' = ${providerMessageId}
+      order by id desc limit 1`;
+    return row ?? null;
+  },
+
+  async hasAssistantAfter(userId: string, id: number): Promise<boolean> {
+    const [row] = await db()<{ x: boolean }[]>`
+      select exists(select 1 from messages where user_id = ${userId} and id > ${id} and role = 'assistant') as x`;
+    return Boolean(row?.x);
+  },
+
   /** The newest assistant-written message (what the user is most likely replying to). */
   async lastAssistant(userId: string): Promise<MessageRow | null> {
     const [row] = await db()<MessageRow[]>`
@@ -291,7 +305,7 @@ export const routines = {
 // ---------------------------------------------------------------------------------------------
 
 export const approvals = {
-  async create(userId: string, tool: string, input: Record<string, unknown>, summary: string, channel: ChannelName | null): Promise<Approval> {
+  async create(userId: string, tool: string, input: Record<string, unknown>, summary: string, channel: ChannelName | null, origin = 'message'): Promise<Approval> {
     const sql = db();
     // Short codes are unique among the user's pending approvals.
     for (let attempt = 0; attempt < 5; attempt++) {
@@ -299,8 +313,8 @@ export const approvals = {
       const [clash] = await sql`select 1 from approvals where user_id = ${userId} and status = 'pending' and short_code = ${code}`;
       if (clash) continue;
       const [row] = await sql<Approval[]>`
-        insert into approvals (user_id, short_code, tool, input, summary, channel)
-        values (${userId}, ${code}, ${tool}, ${j(input)}, ${summary}, ${channel}) returning *`;
+        insert into approvals (user_id, short_code, tool, input, summary, channel, origin)
+        values (${userId}, ${code}, ${tool}, ${j(input)}, ${summary}, ${channel}, ${origin}) returning *`;
       return row!;
     }
     throw new Error('Could not allocate an approval code');

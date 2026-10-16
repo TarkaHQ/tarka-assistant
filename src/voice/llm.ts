@@ -201,12 +201,10 @@ async function personalReply(req: OAIRequest, caller: string, meta: Record<strin
   const said = utterances.at(-1) ?? '';
   const attestation = typeof meta.telnyx_shaken_stir_attestation === 'string' ? meta.telnyx_shaken_stir_attestation : undefined;
   const check = await checkCaller(user, utterances, attestation);
-  if (check.lockedNow) {
-    await sendToUser(user, 'Someone tried several wrong voice PINs on a call from your number, so PIN access on calls is paused for a day. Nothing personal was shared. If that was you, you can text me as usual.', {
-      proactive: true,
-      persist: { role: 'assistant', meta: { source: 'security' } },
-    }).catch(() => {});
-    await audit.add(user.id, 'system', 'voice.pin_locked', {});
+  if (check.notify) {
+    // Every wrong PIN is reported to the account holder, so slow guessing can't go unnoticed.
+    await sendToUser(user, check.notify, { proactive: true, persist: { role: 'assistant', meta: { source: 'security' } } }).catch(() => {});
+    await audit.add(user.id, 'system', 'voice.pin_wrong', { summary: 'A wrong voice PIN was said on a call' });
   }
   // A PIN utterance is answered here in code; it never reaches the model or the conversation.
   if (check.pinReply) return check.pinReply;
@@ -215,7 +213,7 @@ async function personalReply(req: OAIRequest, caller: string, meta: Record<strin
   if (!said) {
     if (check.trusted) return `Hi${user.name ? ` ${user.name}` : ''}! What can I do for you?`;
     return user.settings.voicePin
-      ? `Hi! It's ${name}. Say your voice PIN for anything personal, or just ask me something.`
+      ? `Hi! It's ${name}. Say your voice PIN for anything personal, or just ask me something general.`
       : `Hi! It's ${name}. What can I do for you?`;
   }
 
@@ -228,7 +226,8 @@ async function personalReply(req: OAIRequest, caller: string, meta: Record<strin
 
   if (!check.trusted) {
     // Caller ID alone isn't proof: a restricted assistant with nothing personal, and nothing stored.
-    if (utterances.length === 1) await audit.add(user.id, 'system', 'voice.unverified_call', { summary: `Call from ${caller}: “${said.slice(0, 120)}”` });
+    // (The activity entry doesn't quote the caller: their words would land in the owner's dashboard.)
+    if (utterances.length === 1) await audit.add(user.id, 'system', 'voice.unverified_call', { summary: `Unverified call from ${caller.slice(0, 4)}…${caller.slice(-4)}; nothing personal was shared` });
     const turn = await runTurn({
       user, channel: 'voice', text: said, trigger: 'message',
       restricted: { pinSet: Boolean(user.settings.voicePin), history: callHistory(req.messages ?? []) },

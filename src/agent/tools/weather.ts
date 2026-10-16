@@ -55,9 +55,10 @@ export const weatherTools: ToolSpec[] = [
       unit: z.enum(['celsius', 'fahrenheit']).optional(),
     }),
     run: async ({ place, days, unit }, ctx) => {
-      const where = place ?? ctx.user.city;
-      if (!where) throw new Error('No place given and the user’s city is unknown; ask them.');
-      const defaultUnit = /^America\/(?!Sao_Paulo|Argentina|Bogota|Lima|Santiago|Caracas)/.test(ctx.user.timezone) ? 'fahrenheit' : 'celsius';
+      // An unverified caller must name the place: "the weather at home" would reveal the city.
+      const where = place ?? (ctx.restricted ? null : ctx.user.city);
+      if (!where) throw new Error(ctx.restricted ? 'Ask the caller which city or town.' : 'No place given and the user’s city is unknown; ask them.');
+      const defaultUnit = !ctx.restricted && /^America\/(?!Sao_Paulo|Argentina|Bogota|Lima|Santiago|Caracas)/.test(ctx.user.timezone) ? 'fahrenheit' : 'celsius';
       return weather(where, days ?? 2, unit ?? defaultUnit);
     },
   }),

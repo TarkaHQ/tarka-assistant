@@ -2,11 +2,18 @@ import { tool, type ToolSet } from 'ai';
 import type { z } from 'zod';
 import type { ChannelName, User } from '../../db/types.js';
 
+/** Why the agent is running: the person wrote, a schedule fired, or an approved action executes. */
+export type TurnTrigger = 'message' | 'routine' | 'brief' | 'checkin' | 'event' | 'approval';
+
 /** Everything a tool needs to act for one user. Built fresh for every turn. */
 export interface ToolContext {
   user: User;
   channel: ChannelName;
   now: Date;
+  /** Unprompted turns (schedules, the brief) can't set things up without the person's approval. */
+  trigger: TurnTrigger;
+  /** An unverified phone call: tools must not reveal anything about the account holder. */
+  restricted?: boolean;
   /** Sends a short progress note to the user while a long tool runs (e.g. "Calling now…"). */
   progress?: (text: string) => Promise<void>;
   /** Set when executing an approval the user already granted. */
@@ -21,6 +28,11 @@ export interface ToolSpec<I = any> {
   input: z.ZodType<I>;
   /** Hidden from the model when false (e.g. Google tools before the user connects Google). */
   available?: (ctx: ToolContext) => boolean;
+  /**
+   * Turns relative input into absolute input before anything else ("tomorrow 1pm" becomes a
+   * timestamp), so an action approved hours later still does exactly what the person saw.
+   */
+  normalize?: (input: I, ctx: ToolContext) => I | Promise<I>;
   /**
    * Returns a one-line, user-facing summary when this call needs the user's explicit approval
    * (it sends, buys, calls or deletes on their behalf), or null when it can run straight away.
@@ -65,9 +77,10 @@ export function toAiTools(
     out[spec.name] = tool({
       description: spec.description,
       inputSchema: spec.input,
-      execute: async (input: unknown) => {
-        onCall?.(spec.name, input);
+      execute: async (raw: unknown) => {
+        onCall?.(spec.name, raw);
         try {
+          const input = spec.normalize ? await spec.normalize(raw as never, ctx) : raw;
           const summary = spec.approval ? await spec.approval(input as never, ctx) : null;
           if (summary && !ctx.approved) return await requestApproval(spec, input, summary, ctx);
           return await spec.run(input as never, ctx);

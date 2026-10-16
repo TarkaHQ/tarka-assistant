@@ -1,6 +1,5 @@
 import { approvals, audit, messages } from '../db/repo.js';
 import type { Approval, ChannelName, User } from '../db/types.js';
-import { db } from '../db/index.js';
 import { log } from '../log.js';
 import type { OutboundButton } from '../channels/types.js';
 import { findTool } from './tools/index.js';
@@ -14,9 +13,11 @@ import type { ToolContext, ToolSpec } from './tools/spec.js';
  */
 
 export async function requestApproval(spec: ToolSpec, input: unknown, summary: string, ctx: ToolContext & { created?: Approval[] }): Promise<Record<string, unknown>> {
-  // A newer request for the same tool supersedes an older pending one (e.g. an edited draft).
-  await db()`update approvals set status = 'expired' where user_id = ${ctx.user.id} and tool = ${spec.name} and status = 'pending'`;
-  const a = await approvals.create(ctx.user.id, spec.name, input as Record<string, unknown>, summary, ctx.channel);
+  // Nothing is superseded automatically: each request stays answerable by its own code until it is
+  // decided or expires, so a later request (an edit, or one from a scheduled task) can never
+  // quietly take the place of the one the person is looking at.
+  const origin = ctx.trigger === 'message' ? 'message' : ctx.trigger;
+  const a = await approvals.create(ctx.user.id, spec.name, input as Record<string, unknown>, summary, ctx.channel, origin);
   ctx.created?.push(a);
   await audit.add(ctx.user.id, 'agent', 'approval.requested', { tool: spec.name, approval: a.id, summary });
   return {
@@ -70,10 +71,10 @@ function normalise(text: string): string {
  *  - a bare "yes" decides the request(s) in the assistant's newest message, and nothing older.
  *  - anything else returns null and goes to the conversation as usual.
  */
-export async function matchApprovalReply(user: User, text: string): Promise<ApprovalMatch | null> {
+export async function matchApprovalReply(user: User, text: string, sentAt: Date = new Date()): Promise<ApprovalMatch | null> {
   const raw = text.trim();
-  // A question ("yes?") is hesitation, not a decision.
-  if (!raw || raw.length > 80 || /\?\s*$/.test(raw)) return null;
+  // A question ("yes?", "yes?!") is hesitation, not a decision.
+  if (!raw || raw.length > 80 || raw.includes('?')) return null;
   const pending = await approvals.pending(user.id);
   if (pending.length === 0) return null;
 
@@ -96,18 +97,26 @@ export async function matchApprovalReply(user: User, text: string): Promise<Appr
   if (!decision) return null;
   if (coded.length) return { kind: 'decision', decision, approvals: coded };
 
-  const asked = await justAsked(user.id, pending);
+  const asked = await justAsked(user.id, pending, sentAt);
   if (asked.length === 0) return null;
   if (asked.length === 1 || all) return { kind: 'decision', decision, approvals: asked };
   return { kind: 'clarify', decision, pending: asked };
 }
 
-/** The pending requests presented in the assistant's newest message, if it is recent. */
-async function justAsked(userId: string, pending: Approval[]): Promise<Approval[]> {
+/**
+ * The requests a bare yes/no can answer: those in the assistant's newest message, only if the
+ * person's reply was sent after that message existed (a "yes" typed before the request arrived
+ * never approves it), and only for requests the person asked for themselves. Requests raised by
+ * scheduled tasks or the brief always need their code or a button.
+ */
+async function justAsked(userId: string, pending: Approval[], sentAt: Date): Promise<Approval[]> {
   const last = await messages.lastAssistant(userId);
   if (!last || Date.now() - last.created_at.getTime() > BARE_REPLY_WINDOW_MS) return [];
+  // (Timestamps are compared to the millisecond; a reply written before the request arrived is
+  // seconds older, since the request takes a model turn to produce.)
+  if (sentAt.getTime() < last.created_at.getTime()) return [];
   const ids = Array.isArray(last.meta.approvals) ? (last.meta.approvals as string[]) : [];
-  return pending.filter((a) => ids.includes(a.id));
+  return pending.filter((a) => ids.includes(a.id) && a.origin === 'message');
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -125,15 +134,18 @@ function clip(s: string, max: number): string {
 export function approvalNotice(list: Approval[], channel: ChannelName): string {
   if (list.length === 0 || channel === 'web' || channel === 'cli' || channel === 'voice') return '';
   const max = channel === 'sms' ? 700 : 1500;
+  // Requests nobody asked for just now (from a scheduled task, the brief) need their code.
+  const needsCode = list.some((a) => a.origin !== 'message');
   if (list.length === 1) {
     const a = list[0]!;
     const full = a.summary.length > max ? `${clip(a.summary, max)}\n(Full text in your dashboard.)` : a.summary;
     // Not "reply CANCEL": on SMS that word is a carrier opt-out keyword.
-    const how = channel === 'telegram' ? 'Tap a button, or reply YES to go ahead or NO if not.' : 'Reply YES to go ahead, or NO if not.';
+    const yes = needsCode ? `YES ${a.short_code}` : 'YES';
+    const how = channel === 'telegram' ? `Tap a button, or reply ${yes} to go ahead or NO if not.` : `Reply ${yes} to go ahead, or NO if not.`;
     return `Needs your OK:\n${full}\n${how}`;
   }
   const lines = list.map((a) => `- ${clip(a.summary.split('\n')[0]!, 160)}: reply "yes ${a.short_code}"`);
-  return `These need your OK:\n${lines.join('\n')}\nReply "yes all" for everything, or "no" with a code to cancel one.`;
+  return `These need your OK:\n${lines.join('\n')}\n${needsCode ? 'Reply with each code to go ahead.' : 'Reply "yes all" for everything, or "no" with a code to cancel one.'}`;
 }
 
 export function approvalButtons(list: Approval[]): OutboundButton[] {
@@ -174,7 +186,7 @@ export async function decideApproval(user: User, approvalId: string, decision: '
     await approvals.finish(a.id, 'failed', { error: 'unknown tool' });
     return { ok: false, message: 'Sorry, I can no longer do that action.' };
   }
-  const ctx: ToolContext = { user, channel, now: new Date(), approved: true, activity: [] };
+  const ctx: ToolContext = { user, channel, now: new Date(), trigger: 'approval', approved: true, activity: [] };
   try {
     const result = (await spec.run(a.input as never, ctx)) as Record<string, unknown> | undefined;
     await approvals.finish(a.id, 'executed', result ?? null);

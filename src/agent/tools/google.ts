@@ -26,6 +26,12 @@ function when(text: string, ctx: ToolContext, label: string): Date {
   return d;
 }
 
+/** Relative times become exact ones when the request is made, so a later approval can't shift them. */
+function fixTime(text: string | undefined, ctx: ToolContext, label: string): string | undefined {
+  if (text === undefined) return undefined;
+  return DateTime.fromJSDate(when(text, ctx, label)).setZone(zone(ctx)).toISO({ suppressMilliseconds: true })!;
+}
+
 function localRange(ctx: ToolContext, from?: string, to?: string) {
   const tz = zone(ctx);
   const start = from ? when(from, ctx, 'start') : DateTime.fromJSDate(ctx.now).setZone(tz).startOf('day').toJSDate();
@@ -122,8 +128,9 @@ export const googleTools: ToolSpec[] = [
       add_video_call: z.boolean().optional(),
     }),
     available: isConnected,
-    approval: (i) =>
-      i.attendees?.length ? `Create “${i.title}” (${i.start}) and email invitations to ${i.attendees.join(', ')}` : null,
+    normalize: (i, ctx) => ({ ...i, start: fixTime(i.start, ctx, 'start')!, end: fixTime(i.end, ctx, 'end') }),
+    approval: (i, ctx) =>
+      i.attendees?.length ? `Create “${i.title}” (${shortLocal(new Date(i.start), zone(ctx))}) and email invitations to ${i.attendees.join(', ')}` : null,
     run: async (i, ctx) => {
       const g = await Google.forUser(ctx.user.id);
       const start = when(i.start, ctx, 'start');
@@ -151,12 +158,13 @@ export const googleTools: ToolSpec[] = [
       add_attendees: emailList.optional(),
     }),
     available: isConnected,
+    normalize: (i, ctx) => ({ ...i, start: fixTime(i.start, ctx, 'start'), end: fixTime(i.end, ctx, 'end') }),
     approval: async (i, ctx) => {
       const g = await Google.forUser(ctx.user.id);
       const e = await g.getEvent(i.id);
       const others = e.attendees.filter((a) => !a.self);
       if (others.length === 0 && !i.add_attendees?.length) return null;
-      const changes = [i.start && `move to ${i.start}`, i.title && `rename to “${i.title}”`, i.add_attendees?.length && `invite ${i.add_attendees.join(', ')}`]
+      const changes = [i.start && `move to ${shortLocal(new Date(i.start), zone(ctx))}`, i.title && `rename to “${i.title}”`, i.add_attendees?.length && `invite ${i.add_attendees.join(', ')}`]
         .filter(Boolean)
         .join(', ');
       return `Update “${e.title}”${changes ? ` (${changes})` : ''} and notify ${[...others.map((a) => a.name ?? a.email), ...(i.add_attendees ?? [])].join(', ')}`;

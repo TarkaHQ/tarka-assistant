@@ -20,7 +20,7 @@ for (const [net, prefix] of [
 const v6Blocked = new BlockList();
 for (const [net, prefix] of [
   ['::', 96], // unspecified, loopback and IPv4-compatible (embedded IPv4 is checked separately too)
-  ['::ffff:0:0', 96], ['64:ff9b:1::', 48], ['100::', 64], ['2001::', 23], ['2001:db8::', 32],
+  ['::ffff:0:0', 96], ['::ffff:0:0:0', 96], ['64:ff9b:1::', 48], ['100::', 64], ['2001::', 23], ['2001:db8::', 32],
   ['fc00::', 7], ['fe80::', 10], ['fec0::', 10], ['ff00::', 8],
 ] as const) v6Blocked.addSubnet(net, prefix, 'ipv6');
 

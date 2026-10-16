@@ -18,6 +18,8 @@ export interface InboundMessage {
   media?: InboundMedia[];
   providerMessageId?: string;
   receivedAt: string; // ISO; jobs are JSON
+  /** When our webhook took it (our clock). Orders it against what the assistant had sent by then. */
+  queuedAt?: string;
   /** Telegram /start payload, approval button presses, etc. */
   command?: { name: string; arg?: string };
   /** ISO 3166 alpha-2 of the sender's number, when known (WhatsApp gating). */

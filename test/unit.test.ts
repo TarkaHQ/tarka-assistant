@@ -200,7 +200,7 @@ describe('safety helpers', () => {
   it('sees IPv4 hidden inside IPv6, and other special ranges', () => {
     for (const a of [
       '::ffff:127.0.0.1', '::ffff:7f00:1', '[::ffff:7f00:1]', '::ffff:a9fe:a9fe', '::127.0.0.1', '64:ff9b::a00:1', '64:ff9b::10.0.0.1',
-      '2002:7f00:1::', '0.0.0.0', '::', 'fd00::1', 'fe80::1%eth0', '100.100.100.200', '198.18.0.1', 'not-an-ip', '1::2::3',
+      '2002:7f00:1::', '0.0.0.0', '::', 'fd00::1', 'fe80::1%eth0', '100.100.100.200', '198.18.0.1', 'not-an-ip', '1::2::3', '::ffff:0:a00:1',
     ]) {
       expect([a, isPrivate(a)]).toEqual([a, true]);
     }
@@ -247,20 +247,20 @@ describe('approval codes', () => {
 
 describe('voice PIN parsing', () => {
   it('reads PINs said in many ways', () => {
-    expect(pinAttempt('4719')).toBe('4719');
-    expect(pinAttempt('My PIN is 4 7 1 9.')).toBe('4719');
-    expect(pinAttempt('four seven one nine')).toBe('4719');
-    expect(pinAttempt('forty-seven nineteen')).toBe('4719');
-    expect(pinAttempt('four oh one nine')).toBe('4019');
-    expect(pinAttempt('double four one nine')).toBe('4419');
-    expect(pinAttempt('Oh, um, it’s 4719')).toBe('4719');
+    expect(pinAttempt('471902')).toBe('471902');
+    expect(pinAttempt('My PIN is 4 7 1 9 0 2.')).toBe('471902');
+    expect(pinAttempt('four seven one nine zero two')).toBe('471902');
+    expect(pinAttempt('forty-seven nineteen oh two')).toBe('471902');
+    expect(pinAttempt('four oh one nine one one')).toBe('401911');
+    expect(pinAttempt('double four one nine oh two')).toBe('441902');
+    expect(pinAttempt('Oh, um, it’s 471902')).toBe('471902');
   });
-  it('ignores sentences that merely contain numbers', () => {
-    expect(pinAttempt('my flight is 1234')).toBeNull();
+  it('ignores sentences that merely contain numbers, and short or run-together numbers', () => {
+    expect(pinAttempt('my flight is 123456')).toBeNull();
     expect(pinAttempt('call me at 5')).toBeNull();
     expect(pinAttempt('what is on today')).toBeNull();
-    expect(pinAttempt('12')).toBeNull();
-    expect(pinAttempt('4719 4720 4721')).toBeNull(); // several guesses in one breath aren't a PIN
+    expect(pinAttempt('4719')).toBeNull(); // PINs are at least six digits
+    expect(pinAttempt('471902 471903')).toBeNull(); // several guesses in one breath aren't a PIN
   });
 });
 

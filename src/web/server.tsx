@@ -28,9 +28,11 @@ import { syncSystemRoutines } from '../proactive/system-routines.js';
 import { randomToken, openState, sealState, stableUuid } from '../util/crypto.js';
 import { isValidHHMM, isValidTimezone, nextCronRun, startOfLocalMonth } from '../util/time.js';
 import { voiceCompletions, voiceModels } from '../voice/llm.js';
-import { hashPin, isValidPin, PIN_MAX, PIN_MIN } from '../voice/pin.js';
+import { clearPinFailures, hashPin, isValidPin, PIN_MAX, PIN_MIN } from '../voice/pin.js';
+import { rememberSystemCancel } from '../agent/tools/schedule.js';
 import { ActivityPage, HomePage, HoodPage, MemoryPage, SchedulePage, SettingsPage, messageHtml, ApprovalCard, UpcomingList, type ActivityEntry } from './pages/app.js';
-import { Landing, LoginPage, LoginSent, SignInConfirm, SimpleMessage } from './pages/public.js';
+import { ConfirmCodePage, ConnectGooglePage, Landing, LoginPage, LoginSent, SignInConfirm, SimpleMessage } from './pages/public.js';
+import { checkConfirmCode, sendConfirmCode } from './confirm.js';
 import { currentUser, endSession, rateLimited, requireApi, requirePage, startSession, type AppEnv } from './session.js';
 import { safeNext } from './links.js';
 import { inboundKey } from '../channels/inbound.js';
@@ -46,7 +48,7 @@ function trialDaysLeft(user: User): number | null {
 /** Webhooks hand messages to the queue so the HTTP response is immediate. */
 export async function enqueueInbound(msg: InboundMessage): Promise<void> {
   const identity = await identities.find(msg.channel, msg.externalId);
-  await enqueue('inbound', msg, {
+  await enqueue('inbound', { ...msg, queuedAt: msg.queuedAt ?? new Date().toISOString() }, {
     singletonKey: identity ? `user:${identity.user_id}` : inboundKey(msg),
     // Providers retry webhooks; the same message id is only queued once.
     id: msg.providerMessageId ? stableUuid(`${msg.channel}:${msg.externalId}:${msg.providerMessageId}`) : undefined,
@@ -63,10 +65,25 @@ function sameOrigin(c: Context): boolean {
   return site === 'same-origin';
 }
 
-function accountLabel(user: User): string {
-  const contact = user.email ?? (user.phone ? `${user.phone.slice(0, 3)}…${user.phone.slice(-4)}` : null);
-  if (user.name && contact) return `${user.name} (${contact})`;
-  return user.name ?? contact ?? 'your account';
+/**
+ * How a sign-in page names the account: by things its owner can't simply change (email, phone,
+ * Telegram chat), never by the free-text name, which anyone can set to look like someone else.
+ */
+async function accountLabel(user: User): Promise<string> {
+  if (user.email) return user.email;
+  const ids = (await identities.forUser(user.id)).filter((i) => i.channel !== 'web');
+  const phone = user.phone ?? ids.find((i) => i.channel === 'sms' || i.channel === 'whatsapp')?.external_id;
+  if (phone) return `the phone number ending ${phone.slice(-4)}`;
+  const tg = ids.find((i) => i.channel === 'telegram');
+  if (tg) return `a Telegram chat (id ending ${tg.external_id.slice(-4)})`;
+  return 'an account with no email or phone yet';
+}
+
+/** Sends the confirmation code for connecting Google and shows the page to type it in. */
+async function sendGoogleCode(c: Context, user: User): Promise<Response> {
+  const sent = await sendConfirmCode(user, 'google', 'connect Google to your assistant');
+  if ('error' in sent) return c.html(String(<SimpleMessage title="Couldn’t send a code" body={sent.error} href="/app/settings" cta="Back to settings" />), 400);
+  return c.html(String(<ConfirmCodePage where={sent.where} devCode={sent.devCode} />));
 }
 
 const OAUTH_COOKIE = 'ta_oauth';
@@ -165,7 +182,7 @@ export function createApp(): Hono<AppEnv> {
     const next = safeNext(c.req.query('next'));
     c.header('Referrer-Policy', 'no-referrer');
     c.header('Cache-Control', 'no-store');
-    return c.html(String(<SignInConfirm token={token} next={next} account={accountLabel(user)} connectGoogle={next === '/oauth/google/connect' && cfg.google.enabled} />));
+    return c.html(String(<SignInConfirm token={token} next={next} account={await accountLabel(user)} connectGoogle={next === '/oauth/google/connect' && cfg.google.enabled} />));
   });
 
   app.post('/auth/:token', async (c) => {
@@ -177,7 +194,9 @@ export function createApp(): Hono<AppEnv> {
     if (!user || user.status === 'deleted') return c.redirect('/login');
     await startSession(c, user);
     const next = safeNext(form.next);
-    if (next === '/oauth/google/connect' && cfg.google.enabled) return startGoogleOAuth(c, user);
+    // Connecting Google also needs the code sent to the account's own chat (a sign-in link alone
+    // can be forwarded).
+    if (next === '/oauth/google/connect' && cfg.google.enabled) return sendGoogleCode(c, user);
     return c.redirect(next);
   });
 
@@ -371,8 +390,7 @@ export function createApp(): Hono<AppEnv> {
     else if (action === 'cancel') {
       await routines.setStatus(user.id, r.id, 'cancelled');
       // Record the choice in settings so a later settings change doesn't bring it back.
-      if (r.kind === 'brief') await users.updateSettings(user.id, { briefTime: null });
-      if (r.kind === 'checkin' && user.settings.proactivity !== 'off') await users.updateSettings(user.id, { proactivity: 'low' });
+      await rememberSystemCancel(user.id, r);
     } else if (action === 'resume') {
       const next = r.schedule_type === 'cron' && r.cron ? nextCronRun(r.cron, r.timezone) : r.run_at && r.run_at > new Date() ? r.run_at : null;
       await routines.update(user.id, r.id, { status: next ? 'active' : 'done', nextRunAt: next });
@@ -419,6 +437,7 @@ export function createApp(): Hono<AppEnv> {
       else if (!isValidPin(pin)) return c.json({ error: `A voice PIN is ${PIN_MIN} to ${PIN_MAX} digits.` }, 400);
       else if (/^(\d)\1+$/.test(pin) || '0123456789'.includes(pin) || '9876543210'.includes(pin)) return c.json({ error: 'Pick a PIN that’s harder to guess than a run or a repeated digit.' }, 400);
       else settings.voicePin = hashPin(user.id, pin);
+      await clearPinFailures(user.id);
     }
     let updated = Object.keys(patch).length ? await users.update(user.id, patch) : user;
     if (Object.keys(settings).length) updated = await users.updateSettings(user.id, settings);
@@ -466,18 +485,30 @@ export function createApp(): Hono<AppEnv> {
   });
 
   // ------------------------------------------------------------------ Google OAuth
-  // The flow is bound to the signed-in browser: the callback only completes for the same session
-  // that started it (nonce cookie + user id in the signed state), so nobody can get their own
-  // Google account attached to someone else's assistant, or the reverse, by sharing a link.
-  app.get('/oauth/google/connect', requirePage, (c) => {
+  // Two bindings. (1) Before the flow starts, the person in this browser types a code that went to
+  // the account's own chat, phone or email, so a forwarded sign-in link isn't enough to attach
+  // someone's Google account to another person's assistant. (2) The callback only completes for
+  // the session that started the flow (nonce cookie + user id in the signed state).
+  app.get('/oauth/google/connect', requirePage, async (c) => {
     if (!cfg.google.enabled) return c.redirect('/app/settings');
-    return c.html(String(<SignInConfirm token="" next="/oauth/google/connect" account={accountLabel(c.get('user'))} connectGoogle startUrl="/oauth/google/start" />));
+    return c.html(String(<ConnectGooglePage account={await accountLabel(c.get('user'))} />));
   });
 
-  app.post('/oauth/google/start', requirePage, (c) => {
-    if (!cfg.google.enabled) return c.redirect('/app/settings');
-    if (!sameOrigin(c)) return c.redirect('/app/settings');
-    return startGoogleOAuth(c, c.get('user'));
+  app.post('/oauth/google/code', requirePage, async (c) => {
+    if (!cfg.google.enabled || !sameOrigin(c)) return c.redirect('/app/settings');
+    return sendGoogleCode(c, c.get('user'));
+  });
+
+  app.post('/oauth/google/start', requirePage, async (c) => {
+    if (!cfg.google.enabled || !sameOrigin(c)) return c.redirect('/app/settings');
+    const form = await c.req.parseBody();
+    const user = c.get('user');
+    const result = await checkConfirmCode(user, 'google', String(form.code ?? ''));
+    if (result !== 'ok') {
+      const error = result === 'wrong' ? 'That code doesn’t match. Check the latest message and try again.' : 'That code has expired or was tried too often. Send a new one.';
+      return c.html(String(<ConfirmCodePage where={String(form.where ?? 'your chat').slice(0, 80)} error={error} />), 400);
+    }
+    return startGoogleOAuth(c, user);
   });
 
   app.get('/oauth/google/callback', async (c) => {

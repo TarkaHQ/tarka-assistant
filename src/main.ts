@@ -35,16 +35,16 @@ async function startWeb() {
 }
 
 async function startWorker() {
-  await work<InboundMessage>('inbound', async (msg) => {
-    await handleInbound(msg);
+  await work<InboundMessage>('inbound', async (msg, job) => {
+    await handleInbound(msg, { signal: job.signal, retry: job.retryCount > 0 });
   }, 4);
   await work<{ userId: string; userText: string; assistantText: string; channel: string; at: string; documentId: string }>('memory-retain', async (d) => {
     const user = await users.get(d.userId);
     if (!user) return;
     await memory.retainExchange(user, { userText: d.userText, assistantText: d.assistantText, channel: d.channel, at: new Date(d.at), documentId: d.documentId });
   }, 4);
-  await work<{ routineId: string; userId: string }>('routine-run', async (d) => {
-    await runRoutine(d.routineId, d.userId);
+  await work<{ routineId: string; userId: string }>('routine-run', async (d, job) => {
+    await runRoutine(d.routineId, d.userId, job.signal);
   }, 3);
   await work<{ callId: string; attempt: number }>('call-watch', async (d) => {
     await watchCall(d.callId, d.attempt);

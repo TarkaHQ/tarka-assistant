@@ -89,6 +89,7 @@ const schema = z.object({
   // Per-user ceilings (cost and abuse)
   MAX_TASK_RUNS_PER_DAY: int(24),
   MAX_SCHEDULED_ITEMS: int(60),
+  MAX_REMINDERS_PER_DAY: int(48),
 
   // Telegram
   TELEGRAM_BOT_TOKEN: opt,
@@ -196,6 +197,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env) {
     limits: {
       taskRunsPerDay: c.MAX_TASK_RUNS_PER_DAY,
       scheduledItems: c.MAX_SCHEDULED_ITEMS,
+      remindersPerDay: c.MAX_REMINDERS_PER_DAY,
     },
     telegram: {
       token: c.TELEGRAM_BOT_TOKEN,

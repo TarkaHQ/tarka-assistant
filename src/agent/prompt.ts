@@ -82,7 +82,7 @@ export function buildInstructions(p: PromptInput): string {
       [
         `# Waiting for ${userName}'s approval`,
         ...p.pending.map((a) => `- (${a.short_code}) ${a.summary.split('\n')[0]}`),
-        `${userName} approves by replying YES right after you ask, by replying "yes CODE", or with the buttons. You cannot approve anything yourself. If they seem to be approving one of these now, ask them to reply "yes CODE" with its code. If they want changes, call the tool again with the change (that replaces the pending request).`,
+        `${userName} approves by replying YES right after you ask, by replying "yes CODE", or with the buttons. You cannot approve anything yourself. If they seem to be approving one of these now, ask them to reply "yes CODE" with its code. If they want changes, call the tool again with the change and they answer the new request (the old one just expires).`,
       ].join('\n'),
     );
   }
@@ -159,15 +159,15 @@ export function buildInstructions(p: PromptInput): string {
 function restrictedInstructions(p: PromptInput, pinSet: boolean): string {
   const cfg = config();
   const name = p.user.assistant_name || cfg.product.assistantName;
-  const tz = safeZone(p.user.timezone);
+  // Not even the account holder's timezone: it says roughly where they live.
   return [
     `You are ${name}, a personal assistant, answering a phone call. You run on Tarka (tarkahq.com).`,
-    `# Right now\n- ${describeLocal(p.now, tz)} (${tz})\n- ${CHANNEL_STYLE.voice}`,
+    `# Right now\n- ${describeLocal(p.now, 'UTC')} (UTC)\n- ${CHANNEL_STYLE.voice}`,
     [
       '# This caller is not verified',
       'The call comes from the number on an account, but caller ID can be faked. So on this call:',
       '- Do not reveal or look up anything personal: no memories, schedule, lists, calendar, email, contacts or account details. You do not have them on this call.',
-      '- You can check the weather and search the web for general questions. You cannot set reminders or change anything on this call.',
+      '- You can check the weather for a place the caller names, and search the web for general questions. You cannot set reminders or change anything on this call.',
       pinSet
         ? '- If they want something personal, ask them to say their voice PIN. Never repeat a PIN back or confirm digits.'
         : '- If they want something personal, explain that a voice PIN unlocks that on calls: they can set one in the dashboard under Settings. Until then, texting is the way.',

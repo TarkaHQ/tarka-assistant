@@ -166,6 +166,66 @@ export const SignInConfirm: FC<{ token: string; next: string; account: string; c
   </Layout>
 );
 
+/** First step of connecting Google from the dashboard: a code goes to the account's own chat. */
+export const ConnectGooglePage: FC<{ account: string }> = ({ account }) => (
+  <Layout title="Connect Google" ridge>
+    <header class="shell" style="padding-top:22px">
+      <Logo />
+    </header>
+    <main class="shell auth">
+      <h1>Connect Google</h1>
+      <p>
+        You’re connecting Google to the assistant account for <strong>{account}</strong>. First we’ll send a code to that account’s chat, phone or
+        email to make sure it’s you.
+      </p>
+      <form method="post" action="/oauth/google/code">
+        <button class="btn" type="submit">
+          Send me a code
+        </button>
+      </form>
+    </main>
+  </Layout>
+);
+
+/**
+ * The code check: whoever is in this browser must also be able to read the account's own chat,
+ * so a sign-in link forwarded to someone else can't be used to attach their Google account.
+ */
+export const ConfirmCodePage: FC<{ where: string; error?: string; devCode?: string }> = ({ where, error, devCode }) => (
+  <Layout title="Confirm it’s you" ridge>
+    <header class="shell" style="padding-top:22px">
+      <Logo />
+    </header>
+    <main class="shell auth">
+      <h1>Confirm it’s you</h1>
+      <p>
+        We sent a 6-digit code to <strong>{where}</strong>. Type it here to continue to Google.
+      </p>
+      {error ? <div class="notice warn">{error}</div> : null}
+      {devCode ? <div class="notice">Development mode: the code is {devCode}</div> : null}
+      <form method="post" action="/oauth/google/start">
+        <input type="hidden" name="where" value={where} />
+        <div class="field">
+          <label for="code">Code</label>
+          <input id="code" name="code" type="text" inputmode="numeric" autocomplete="one-time-code" pattern="\d{6}" maxlength={6} required />
+        </div>
+        <button class="btn" type="submit">
+          Continue to Google
+        </button>
+      </form>
+      <p class="hint" style="margin-top:18px">
+        Only use a code from your own chat with your assistant. If someone else sent you the link to this page, stop here: it would connect your Google
+        account to their assistant.
+      </p>
+      <form method="post" action="/oauth/google/code" style="margin-top:12px">
+        <button class="btn small secondary" type="submit">
+          Send a new code
+        </button>
+      </form>
+    </main>
+  </Layout>
+);
+
 export const SimpleMessage: FC<{ title: string; body: string; href?: string; cta?: string }> = ({ title, body, href, cta }) => (
   <Layout title={title} ridge>
     <header class="shell" style="padding-top:22px">
