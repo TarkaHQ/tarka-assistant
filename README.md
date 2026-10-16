@@ -74,10 +74,12 @@ Each scenario ran twice per model, on 16 October 2026:
 | qwen3.8-flash-next | 23/24 | 37.4 s | $0 (no charge today) |
 | deepseek-v4.1-flash | 24/24 | 2.5 s | $0.032 |
 | glm-5.3-flash | 24/24 | 4.5 s | $0.025 |
-| kimi-k3 | 24/24 | 6.2 s | $0.31 |
+| kimi-k3 | 21/24 | 6.4 s | $0.31 |
 
 - **Qwen:** its one miss was a check-in that hit the 150-second limit. Qwen generated about 28 tokens a second in these runs.
-- **Kimi K3:** it needed the empty-reply retry in `src/agent/turn.ts` to get there.
+- **Kimi K3:** results varied between runs; another run the same day passed 24/24.
+  - It often ends with an empty reply or a lost tool call. `src/agent/turn.ts` asks again (twice at most, text only once something has changed), and that recovers most of them.
+  - The misses were an empty reply after two retries, a reply that was raw JSON, and a greeting the check didn't recognise.
 - **Before the fixes found by the first run,** the same scenarios passed 18, 20, 19 and 13 times out of 24. The first run turned up:
   - a calendar bug: "tomorrow" was read as 9 AM to 9 AM;
   - Kimi's empty and garbled replies;

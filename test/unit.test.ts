@@ -8,6 +8,8 @@ import { encrypt, decrypt, sealState, openState, shortCode, APPROVAL_CODE_ALPHAB
 import { parseTelnyxMessage } from '../src/channels/telnyx.js';
 import { buildRaw, extractBody } from '../src/integrations/google.js';
 import { historyToMessages } from '../src/agent/turn.js';
+import { localRange } from '../src/agent/tools/google.js';
+import type { ToolContext } from '../src/agent/tools/spec.js';
 import { redactSecrets } from '../src/memory/hindsight.js';
 import { assertPublicUrl, isPrivate, pinnedLookup, v6Groups } from '../src/util/net.js';
 import { pinAttempt } from '../src/voice/pin.js';
@@ -64,7 +66,22 @@ describe('time parsing', () => {
     expect(local(parseRangeEdge('tomorrow at 3pm', tz, 'end', now))).toBe('2026-10-17 15:00');
     expect(local(parseRangeEdge('2026-10-17T08:30', tz, 'start', now))).toBe('2026-10-17 08:30');
     expect(local(parseRangeEdge('in 2 hours', tz, 'end', now))).toBe('2026-10-16 11:00');
+    expect(local(parseRangeEdge('in 3 days', tz, 'start', now))).toBe('2026-10-19 00:00'); // a day, not 09:00 Monday
     expect(parseRangeEdge('whenever', tz, 'start', now)).toBeNull();
+  });
+  it('reads a span ("next week", "this weekend") as the whole span', () => {
+    const local = (d: Date | null) => DateTime.fromJSDate(d!).setZone(tz).toFormat('ccc yyyy-LL-dd HH:mm');
+    expect([local(parseRangeEdge('next week', tz, 'start', now)), local(parseRangeEdge('next week', tz, 'end', now))]).toEqual(['Mon 2026-10-19 00:00', 'Sun 2026-10-25 23:59']);
+    expect([local(parseRangeEdge('this weekend', tz, 'start', now)), local(parseRangeEdge('this weekend', tz, 'end', now))]).toEqual(['Sat 2026-10-17 00:00', 'Sun 2026-10-18 23:59']);
+    expect(local(parseRangeEdge('next month', tz, 'end', now))).toBe('Mon 2026-11-30 23:59');
+    expect(local(parseRangeEdge('next 3 days', tz, 'end', now))).toBe('Mon 2026-10-19 23:59');
+  });
+  it('asks for exact dates when a calendar range comes out backwards', () => {
+    const saturday = new Date('2026-10-17T16:00:00Z');
+    const ctx = { user: { timezone: tz }, now: saturday } as unknown as ToolContext;
+    expect(() => localRange(ctx, 'Friday', 'Monday')).toThrow(/exact dates/); // next Friday is after next Monday
+    const sameDay = localRange(ctx, 'tomorrow 9am', 'tomorrow 9am');
+    expect(DateTime.fromJSDate(sameDay.end).setZone(tz).toFormat('HH:mm')).toBe('23:59');
   });
 });
 
@@ -110,9 +127,16 @@ describe('formatting', () => {
     const kimi = '<|open|>tools<|sep|><|open|>call tool="email_read" index="1"<|sep|><|open|>argument key="id" type="string"<|sep|>m1<|close|>argument<|sep|>';
     expect(hasLeakedTokens(kimi)).toBe(true);
     expect(usableReply(kimi)).toBe('');
-    expect(hasLeakedTokens('Sure.<|im_end|>')).toBe(true);
+    expect(hasLeakedTokens('<|im_start|>assistant')).toBe(true);
     expect(hasLeakedTokens('<｜tool▁calls▁begin｜>')).toBe(true);
+    expect(hasLeakedTokens('<|tool▁calls▁begin|>')).toBe(true);
     expect(hasLeakedTokens('<tool_call>{"name":"x"}</tool_call>')).toBe(true);
+    expect(hasLeakedTokens('[TOOL_CALLS][{"name":"get_order"}]')).toBe(true);
+    expect(hasLeakedTokens('functions.get_order:0{"order_id":"1042"}')).toBe(true);
+    // A good reply with a stray end marker is kept, without the marker.
+    expect(usableReply('Sure, done.<|im_end|>')).toBe('Sure, done.');
+    expect(usableReply('All set. <|eot_id|>')).toBe('All set.');
+    expect(usableReply('Booked for Friday.<｜end▁of▁sentence｜>')).toBe('Booked for Friday.');
     for (const ok of ['a <b> c', 'x || y', 'pipe | and <| alone', '5 < 6 > 4', 'Order #1042 — <3']) expect(hasLeakedTokens(ok)).toBe(false);
     expect(usableReply('<think>hmm</think> Hi there')).toBe('Hi there');
   });

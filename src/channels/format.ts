@@ -5,19 +5,25 @@ export function stripThinking(text: string): string {
   return text.replace(/<think>[\s\S]*?<\/think>/gi, '').replace(/^\s*<\/?think>\s*/gi, '').trim();
 }
 
+/** End-of-turn markers some servers leave on an otherwise good reply. */
+const TRAILING_END_TOKENS = /(\s*(<\|(?:im_end|eot_id|eom_id|end|endoftext|end_of_text)\|>|<｜end▁of▁sentence｜>|<\/s>))+\s*$/;
+
 /**
  * Chat-template control tokens that leaked into a reply: the serving side failed to turn the
- * model's output into a tool call or a message (seen with Kimi K3 on Tarka, which sent
- * `<|open|>tools<|sep|>…` as text). Such a reply must never reach the user.
+ * model's output into a tool call or a message (Kimi K3 on Tarka sent `<|open|>tools<|sep|>…` as
+ * text). Also the raw tool-call shapes of a few other model families. Such a reply must never
+ * reach the user.
  */
-const LEAKED_TOKENS = /<\|[a-z_]{2,24}\|>|<｜[^｜\n]{1,40}｜>|<\/?tool_call>/;
+const LEAKED_TOKENS =
+  /<\|[A-Za-z0-9_▁]{2,32}\|>|<｜[^｜\n]{1,40}｜>|<\/?tool_call>|\[TOOL_CALLS\]|<minimax:tool_call>|(^|\n)\s*functions\.[A-Za-z0-9_]+:\d+\s*\{/;
+
 export function hasLeakedTokens(text: string): boolean {
-  return LEAKED_TOKENS.test(text);
+  return LEAKED_TOKENS.test(text.replace(TRAILING_END_TOKENS, ''));
 }
 
-/** The model's reply as it may be shown: thinking removed, and nothing if the output is garbled. */
+/** The model's reply as it may be shown: thinking and stray end markers removed, nothing if garbled. */
 export function usableReply(text: string): string {
-  const t = stripThinking(text);
+  const t = stripThinking(text).replace(TRAILING_END_TOKENS, '').trim();
   return hasLeakedTokens(t) ? '' : t;
 }
 

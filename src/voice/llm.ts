@@ -153,7 +153,8 @@ async function conciergeReply(req: OAIRequest, callId: string, meta: Record<stri
     outputTokens: u.outputTokens ?? 0, costMicroUsd: costMicroUsd(model, u.inputTokens ?? 0, u.inputTokenDetails?.cacheReadTokens ?? 0, u.outputTokens ?? 0),
   });
   return {
-    text: formatFor('voice', usableReply(res.text ?? '')),
+    // Garbled or empty output would be silence on the line: ask them to repeat, which keeps the call going.
+    text: formatFor('voice', usableReply(res.text ?? '') || (res.toolCalls.length ? '' : 'Sorry, could you say that again?')),
     toolCalls: res.toolCalls.map((tc) => ({ id: tc.toolCallId, name: tc.toolName, args: JSON.stringify(tc.input ?? {}) })),
   };
 }
@@ -185,7 +186,7 @@ function callHistory(msgs: OAIMessage[]): ModelMessage[] {
   return out;
 }
 
-async function personalReply(req: OAIRequest, caller: string, meta: Record<string, unknown>): Promise<string> {
+async function personalReply(req: OAIRequest, caller: string, meta: Record<string, unknown>, signal?: AbortSignal): Promise<string> {
   const cfg = config();
   let user: User | null = null;
   const identity = (await identities.find('voice', caller)) ?? (await identities.find('sms', caller)) ?? (await identities.find('whatsapp', caller));
@@ -229,13 +230,14 @@ async function personalReply(req: OAIRequest, caller: string, meta: Record<strin
     // (The activity entry doesn't quote the caller: their words would land in the owner's dashboard.)
     if (utterances.length === 1) await audit.add(user.id, 'system', 'voice.unverified_call', { summary: `Unverified call from ${caller.slice(0, 4)}…${caller.slice(-4)}; nothing personal was shared` });
     const turn = await runTurn({
-      user, channel: 'voice', text: said, trigger: 'message',
+      user, channel: 'voice', text: said, trigger: 'message', abortSignal: signal,
       restricted: { pinSet: Boolean(user.settings.voicePin), history: callHistory(req.messages ?? []) },
     });
     return formatFor('voice', turn.text);
   }
 
-  const turn = await runTurn({ user, channel: 'voice', text: said, trigger: 'message', persistUserMessage: true, userMeta: { verifiedBy: check.how } });
+  // The caller hanging up aborts the turn, so tools don't keep running for nobody.
+  const turn = await runTurn({ user, channel: 'voice', text: said, trigger: 'message', persistUserMessage: true, userMeta: { verifiedBy: check.how }, abortSignal: signal });
   // Approvals are confirmed in writing, on the person's own text channel.
   if (turn.approvals.length) {
     const channel = await proactiveChannel(user);
@@ -280,7 +282,7 @@ export async function voiceCompletions(c: Context): Promise<Response> {
       ({ text, toolCalls } = await conciergeReply(req, meta.ta_call_id, meta));
     } else {
       const caller = String(meta.telnyx_end_user_target ?? meta.from ?? '');
-      text = caller ? await personalReply(req, caller, meta) : "Sorry, I can't tell who's calling. Please call from the number you registered.";
+      text = caller ? await personalReply(req, caller, meta, c.req.raw.signal) : "Sorry, I can't tell who's calling. Please call from the number you registered.";
     }
   } catch (err) {
     log.error({ err: String(err) }, 'voice completion failed');

@@ -192,7 +192,7 @@ export async function decideApproval(user: User, approvalId: string, decision: '
     await approvals.finish(a.id, 'executed', result ?? null);
     await audit.add(user.id, 'agent', a.tool, { approval: a.id, input: a.input, result: summariseResult(result) });
     for (const act of ctx.activity) await audit.add(user.id, 'agent', act.tool, { summary: act.summary });
-    const firstLine = a.summary.split('\n')[0]!;
+    const firstLine = a.summary.split('\n')[0]!.replace(/[:\s]+$/, ''); // "Send email to x — “Hi”:" introduces the body
     const done = typeof result?.message === 'string' ? (result.message as string) : `Done: ${lowerFirst(firstLine)}.`;
     await messages.add(user.id, 'event', channel, `Approved by the user and done: ${firstLine}`, { approval: a.id, result: summariseResult(result) });
     return { ok: true, message: done };

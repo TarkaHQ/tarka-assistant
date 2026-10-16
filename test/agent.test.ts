@@ -670,6 +670,7 @@ describe('accounts and channels', () => {
       expect(r.reply).toMatch(/remind you to call Mum/);
       expect(calls).toHaveLength(3);
       expect(calls[2]!.prompt).toContain('"role":"tool"'); // it carries on from what the tool did
+      expect(calls[2]!.toolChoice).toEqual({ type: 'none' }); // a reminder was set: text only, nothing twice
       expect(await routines.byKind(user.id, 'reminder')).toHaveLength(1); // the tool ran once
       expect(r.turn?.trace.outputTokens).toBe(15); // the retry is counted
     } finally {
@@ -730,6 +731,71 @@ describe('accounts and channels', () => {
       const r = await handleInbound(sms('+4915100000120', "what's on my list?"));
       expect(r.reply).toBe('Your list is empty.');
       expect(n).toBe(2);
+    } finally {
+      clearModel();
+    }
+  });
+
+  it('after only look-ups, lets the retry make the call the model lost', async () => {
+    const user = await makeUser({ phone: '+4915100000121' });
+    const { MockLanguageModelV4 } = await import('ai/test');
+    const { setModelOverride } = await import('../src/models/tarka.js');
+    const usage = { inputTokens: { total: 10, noCache: 10, cacheRead: 0, cacheWrite: undefined }, outputTokens: { total: 5, text: 5, reasoning: undefined } };
+    const calls: unknown[] = [];
+    const call = (toolName: string, input: unknown) => ({ content: [{ type: 'tool-call' as const, toolCallId: `c${calls.length}`, toolName, input: JSON.stringify(input) }], finishReason: { unified: 'tool-calls' as const, raw: undefined }, usage, warnings: [] });
+    setModelOverride(() =>
+      new MockLanguageModelV4({
+        doGenerate: async (options) => {
+          calls.push(options.toolChoice);
+          if (calls.length === 1) return call('list_show', { list: 'groceries' });
+          if (calls.length === 2) return { content: [{ type: 'reasoning', text: 'Now add milk.' }], finishReason: { unified: 'stop', raw: 'stop' }, usage, warnings: [] };
+          if (calls.length === 3) return call('list_add', { list: 'groceries', items: ['milk'] });
+          return { content: [{ type: 'text', text: 'Added milk.' }], finishReason: { unified: 'stop', raw: 'stop' }, usage, warnings: [] };
+        },
+      }),
+    );
+    try {
+      const r = await handleInbound(sms('+4915100000121', 'add milk to my groceries'));
+      expect(r.reply).toBe('Added milk.');
+      expect(calls[2]).not.toEqual({ type: 'none' }); // only a look-up had run
+      expect((await lists.items(user.id, 'groceries')).map((i) => i.text)).toEqual(['milk']);
+    } finally {
+      clearModel();
+    }
+  });
+
+  it('says it lost the thread, not "Done.", when nothing happened', async () => {
+    await makeUser({ phone: '+4915100000122' });
+    const { MockLanguageModelV4 } = await import('ai/test');
+    const { setModelOverride } = await import('../src/models/tarka.js');
+    const usage = { inputTokens: { total: 10, noCache: 10, cacheRead: 0, cacheWrite: undefined }, outputTokens: { total: 5, text: 5, reasoning: undefined } };
+    setModelOverride(() => new MockLanguageModelV4({ doGenerate: async () => ({ content: [], finishReason: { unified: 'stop', raw: 'stop' }, usage, warnings: [] }) }));
+    try {
+      const r = await handleInbound(sms('+4915100000122', 'hello?'));
+      expect(r.reply).toMatch(/couldn’t put a reply together/);
+    } finally {
+      clearModel();
+    }
+  });
+
+  it('leaves the answer to the job retry when stopped before anything happened', async () => {
+    const user = await makeUser({ phone: '+4915100000123' });
+    const { MockLanguageModelV4 } = await import('ai/test');
+    const { setModelOverride } = await import('../src/models/tarka.js');
+    const usage = { inputTokens: { total: 10, noCache: 10, cacheRead: 0, cacheWrite: undefined }, outputTokens: { total: 5, text: 5, reasoning: undefined } };
+    const stop = new AbortController();
+    setModelOverride(() =>
+      new MockLanguageModelV4({
+        doGenerate: async () => {
+          stop.abort(); // the job runs out of time while the model answers, emptily
+          return { content: [{ type: 'reasoning', text: '…' }], finishReason: { unified: 'stop', raw: 'stop' }, usage, warnings: [] };
+        },
+      }),
+    );
+    try {
+      const r = await handleInbound(sms('+4915100000123', 'what is on my list?'), { signal: stop.signal });
+      expect(r.reply).toBeUndefined();
+      expect((await messages.recent(user.id, 10)).filter((m) => m.role === 'assistant')).toHaveLength(0);
     } finally {
       clearModel();
     }

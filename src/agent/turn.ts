@@ -39,6 +39,16 @@ export interface TurnInput {
   restricted?: { pinSet: boolean; history: ModelMessage[] };
 }
 
+/** Tools that only look things up: calling one again changes nothing. */
+const READ_ONLY_TOOLS = new Set([
+  'calendar_events', 'calendar_free_slots', 'contacts_search', 'drive_read', 'drive_search', 'email_read', 'email_search',
+  'list_scheduled', 'list_show', 'memory_reflect', 'memory_search', 'run_python', 'upgrade_link', 'weather', 'web_read', 'web_search',
+]);
+
+/** How long one turn may take, retries included. Voice: a caller won't wait longer. Text: inside the inbound job's expiry. */
+const VOICE_TURN_BUDGET_MS = 25_000;
+const TEXT_TURN_BUDGET_MS = 360_000;
+
 export interface TurnTrace {
   model: string;
   inputTokens: number;
@@ -224,11 +234,15 @@ export async function runTurn(input: TurnInput): Promise<TurnResult> {
   // 4. Generate, with one fallback model on provider failure. Only when no tool has run yet:
   //    a retry after a tool ran could repeat what it did (a second reminder, a second request).
   const candidates = [primary, ...(cfg.models.fallbackModel && cfg.models.fallbackModel !== primary ? [cfg.models.fallbackModel] : [])];
+  const voice = input.channel === 'voice';
+  const deadline = started + (voice ? VOICE_TURN_BUDGET_MS : TEXT_TURN_BUDGET_MS);
   let result: Awaited<ReturnType<typeof generateText>> | undefined;
   let usedModel = primary;
   let lastErr: unknown;
-  for (const modelId of candidates) {
+  for (const [i, modelId] of candidates.entries()) {
     if (toolsUsed.length > 0) break;
+    const left = deadline - Date.now();
+    if (i > 0 && left < 5_000) break; // no time left for the fallback model
     try {
       result = await generateText({
         model: chatModel(modelId),
@@ -238,7 +252,7 @@ export async function runTurn(input: TurnInput): Promise<TurnResult> {
         stopWhen: stepCountIs(cfg.models.maxSteps),
         maxRetries: 2,
         abortSignal: input.abortSignal,
-        timeout: { totalMs: input.channel === 'voice' ? 25_000 : 150_000 },
+        timeout: { totalMs: Math.max(5_000, Math.min(voice ? 25_000 : 150_000, left)) },
         providerOptions: { tarka: { user: user.id } },
       });
       usedModel = modelId;
@@ -250,17 +264,21 @@ export async function runTurn(input: TurnInput): Promise<TurnResult> {
   }
   if (!result) throw lastErr instanceof Error ? lastErr : new Error(String(lastErr));
 
-  // Some models now and then finish with an empty message, the answer left in their reasoning
-  // or a tool call lost on the way (Kimi K3 on Tarka did in about a third of tool loops in
-  // October 2026). Ask again, up to twice, from where it stopped, tools included: what already
-  // ran is in the history with its result, so the model carries on rather than starting over.
+  // Some models now and then finish with an empty message (the answer left in their reasoning,
+  // or a tool call lost on the way) or with chat-template tokens as text: Kimi K3 on Tarka did
+  // in about a third of tool loops in October 2026. Ask again from where it stopped, within the
+  // turn's time budget. While only look-ups have run, the model may still use its tools (to make
+  // the call it lost); once something has changed (a reminder set, a request raised), text only,
+  // so nothing happens twice.
+  const changedSomething = () => ctx.created.length > 0 || toolsUsed.some((t) => !READ_ONLY_TOOLS.has(t));
   const retryUsage = { inputTokens: 0, cached: 0, outputTokens: 0 };
   let retryText = '';
   let retrySteps = 0;
-  // An empty or garbled reply (control tokens leaked as text) is asked again, never shown.
   let lastEmpty = !usableReply(result.text ?? '') && (result.finishReason === 'stop' || hasLeakedTokens(result.text ?? ''));
   let sofar = [...result.responseMessages]; // every step so far (result.response is only the last)
-  for (let attempt = 1; attempt <= 2 && lastEmpty && !input.abortSignal?.aborted; attempt++) {
+  for (let attempt = 1; attempt <= (voice ? 1 : 2) && lastEmpty && !input.abortSignal?.aborted; attempt++) {
+    const left = deadline - Date.now();
+    if (left < (voice ? 5_000 : 20_000)) break;
     if (sofar.at(-1)?.role === 'assistant') sofar = sofar.slice(0, -1); // the empty message
     try {
       const again = await generateText({
@@ -268,10 +286,10 @@ export async function runTurn(input: TurnInput): Promise<TurnResult> {
         instructions,
         messages: [...modelMessages, ...sofar],
         tools,
-        stopWhen: stepCountIs(cfg.models.maxSteps),
-        maxRetries: 1,
+        ...(changedSomething() ? { toolChoice: 'none' as const } : { stopWhen: stepCountIs(4) }),
+        maxRetries: 0,
         abortSignal: input.abortSignal,
-        timeout: { totalMs: input.channel === 'voice' ? 10_000 : 90_000 },
+        timeout: { totalMs: Math.min(left, 90_000) },
         providerOptions: { tarka: { user: user.id } },
       });
       retryText = usableReply(again.text ?? '');
@@ -290,9 +308,16 @@ export async function runTurn(input: TurnInput): Promise<TurnResult> {
 
   // 5. Post-process.
   let text = usableReply(result.text ?? '') || retryText;
+  // Stopped from outside (the job ran out of time, the worker is stopping, the caller hung up)
+  // before there was anything to say: if nothing has changed yet, the job's retry answers.
+  if (!text && input.abortSignal?.aborted && !changedSomething()) throw new Error('turn aborted before a reply');
   const silent = input.trigger !== 'message' && (NO_MESSAGE.test(text) || text === '');
   if (!text && !silent) {
-    text = ctx.created.length ? 'I need your OK before I go ahead — see above.' : 'Done.';
+    text = ctx.created.length
+      ? 'I need your OK before I go ahead — see above.'
+      : ctx.activity.length
+        ? `Done: ${ctx.activity.map((a) => a.summary).join('; ')}.`
+        : 'Sorry, I couldn’t put a reply together just now. Could you say that again?';
   }
   text = text.replace(/\bNO_MESSAGE\b/g, '').trim();
 

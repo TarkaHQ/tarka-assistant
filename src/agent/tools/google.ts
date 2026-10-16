@@ -43,8 +43,15 @@ export function localRange(ctx: ToolContext, from?: string, to?: string) {
   const tz = zone(ctx);
   const start = from ? edge(from, ctx, 'start') : DateTime.fromJSDate(ctx.now).setZone(tz).startOf('day').toJSDate();
   let end = to ? edge(to, ctx, 'end') : DateTime.fromJSDate(start).setZone(tz).plus({ days: 1 }).endOf('day').toJSDate();
-  // An end at or before the start (both "tomorrow 9am", say): the rest of that day.
-  if (end <= start) end = DateTime.fromJSDate(start).setZone(tz).endOf('day').toJSDate();
+  if (end <= start) {
+    const s = DateTime.fromJSDate(start).setZone(tz);
+    // Same day (both "tomorrow 9am", say): the rest of that day. Otherwise the words were read
+    // differently than meant ("Friday" to "Monday" on a Saturday): ask for exact dates.
+    if (!s.hasSame(DateTime.fromJSDate(end).setZone(tz), 'day')) {
+      throw new Error(`The end (${shortLocal(end, tz)}) is before the start (${shortLocal(start, tz)}). Give exact dates, e.g. from "2026-10-16" to "2026-10-19".`);
+    }
+    end = s.endOf('day').toJSDate();
+  }
   return { start, end };
 }
 
