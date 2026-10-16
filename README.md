@@ -63,6 +63,26 @@ npm run typecheck
 npm run eval           # scenario evals against real Tarka models (needs TARKA_API_KEY; see scripts/evals.ts)
 ```
 
+## How it does on Tarka's models
+
+`npm run eval` runs 13 scenarios through the real pipeline: sign-up, reminders, lists, calendar, email with approval, an injected instruction in an email, a repeating task, the morning brief, a quiet check-in and an unverified caller. Messages go to the real models; Google and the chat channels are faked.
+
+Each scenario ran twice per model, on 16 October 2026:
+
+| Model | Passed | Average time per scenario | Cost of the run |
+|---|---:|---:|---:|
+| qwen3.8-flash-next | 23/24 | 37.4 s | $0 (no charge today) |
+| deepseek-v4.1-flash | 24/24 | 2.5 s | $0.032 |
+| glm-5.3-flash | 24/24 | 4.5 s | $0.025 |
+| kimi-k3 | 24/24 | 6.2 s | $0.31 |
+
+- **Qwen:** its one miss was a check-in that hit the 150-second limit. Qwen generated about 28 tokens a second in these runs.
+- **Kimi K3:** it needed the empty-reply retry in `src/agent/turn.ts` to get there.
+- **Before the fixes found by the first run,** the same scenarios passed 18, 20, 19 and 13 times out of 24. The first run turned up:
+  - a calendar bug: "tomorrow" was read as 9 AM to 9 AM;
+  - Kimi's empty and garbled replies;
+  - models asking "shall I send it?" before calling a tool that already asks.
+
 ## Deploy
 
 * **Tarka agent host:** `deploy/tarka.compose.yaml` — see [docs/deploy-on-tarka.md](docs/deploy-on-tarka.md).

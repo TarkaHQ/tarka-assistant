@@ -14,6 +14,11 @@ The whole assistant (app, Postgres with pgvector, Hindsight) runs as one custom 
 Totals: 3.55 vCPU and about 5.5 GiB of limits, inside the core tier.
 
 * **Models need no key.** Every service reaches `http://tarka/v1`; the host's gateway adds the identity. `app` is listed under the runtime's platform services, so it also receives `TARKA_PRIMARY_MODEL` and the speech-to-text, OCR and speech models. Hindsight's own model calls (fact extraction, profile refresh) go through the same gateway.
+* **Which model answers.** Replies use `default_model_alias` (as `TARKA_PRIMARY_MODEL`) unless `DEFAULT_MODEL` is set.
+  - The template uses `qwen3.8-flash-next`, which every workspace has. In the October 2026 evals it passed 23 of 24 scenarios but took 37 s per scenario on average, too slow for phone calls.
+  - If your workspace has `deepseek-v4.1-flash` or `glm-5.3-flash`, use one of them: both passed 24 of 24 at 2–5 s.
+  - Hindsight's fact extraction runs in the background, so it can stay on Qwen.
+  - See the README's eval table for the numbers.
 * **No capabilities.** Postgres starts as user 999 rather than switching user from root; `volume-init` opens the fresh volumes so it can create its data directory.
 * **One database.** Hindsight keeps its tables in the `hindsight` schema of the app's database.
 
