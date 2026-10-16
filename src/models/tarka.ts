@@ -40,7 +40,7 @@ export interface ModelInfo {
   price: { in: number; cached: number; out: number };
 }
 
-/** Display metadata. Prices default to Tarka's published or upstream rates; override with MODEL_PRICES. */
+/** Display metadata. Prices are what Tarka charges (October 2026: the provider's price plus 10%); override with MODEL_PRICES. */
 const KNOWN: Record<string, Omit<ModelInfo, 'id'>> = {
   'qwen3.8-flash-next': {
     label: 'Qwen 3.8 Flash',
@@ -52,19 +52,19 @@ const KNOWN: Record<string, Omit<ModelInfo, 'id'>> = {
     label: 'DeepSeek V4.1 Flash',
     blurb: 'Quick, and dependable with tools. Low cost.',
     tier: 'standard',
-    price: { in: 0.3, cached: 0.006, out: 1.2 },
+    price: { in: 0.33, cached: 0.0066, out: 1.32 },
   },
   'glm-5.3-flash': {
     label: 'GLM 5.3 Flash',
     blurb: 'The cheapest option, and dependable for everyday tasks.',
     tier: 'standard',
-    price: { in: 0.135, cached: 0.027, out: 0.45 },
+    price: { in: 0.1485, cached: 0.0297, out: 0.495 },
   },
   'kimi-k3': {
     label: 'Kimi K3',
     blurb: 'The largest model here. Slower, and about ten times the price of DeepSeek.',
     tier: 'premium',
-    price: { in: 2.7, cached: 0.27, out: 13.5 },
+    price: { in: 2.97, cached: 0.297, out: 14.85 },
   },
 };
 
