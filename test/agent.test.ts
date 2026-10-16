@@ -801,3 +801,18 @@ describe('second review: approvals, schedules and links', () => {
     await expect(weatherTools[0]!.run({}, ctx)).rejects.toThrow(/which city/);
   });
 });
+
+describe('model budget', () => {
+  it('falls back to the default model once a pricier model’s monthly allowance is used', async () => {
+    const user = await makeUser({ phone: '+4915100000400' });
+    await users.update(user.id, { model: 'kimi-k3' });
+    scriptedModel([{ text: 'Hi from Kimi' }]);
+    await handleInbound(sms('+4915100000400', 'hello'));
+    await usage.add({ userId: user.id, purpose: 'chat', model: 'kimi-k3', inputTokens: 1, cachedInputTokens: 0, outputTokens: 1, costMicroUsd: 9_000_000 });
+    scriptedModel([{ text: 'Hi again' }]);
+    await handleInbound(sms('+4915100000400', 'hello again'));
+    const rows = await db()<{ model: string }[]>`select model from usage_events where user_id = ${user.id} and purpose = 'chat' order by id`;
+    expect(rows.map((r) => r.model)).toEqual(['kimi-k3', 'kimi-k3', 'qwen3.8-flash-next']);
+    expect((await messages.recent(user.id)).some((m) => m.role === 'event' && /allowance/.test(m.content))).toBe(true);
+  });
+});

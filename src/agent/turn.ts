@@ -1,10 +1,11 @@
 import { generateText, stepCountIs, type ModelMessage } from 'ai';
 import { config } from '../config.js';
-import { integrations, messages, routines, usage, users, approvals as approvalsRepo, audit } from '../db/repo.js';
+import { integrations, kv, messages, routines, usage, users, approvals as approvalsRepo, audit } from '../db/repo.js';
 import type { Approval, ChannelName, MessageRow, User } from '../db/types.js';
 import { log } from '../log.js';
 import { memory } from '../memory/hindsight.js';
-import { chatModel, costMicroUsd } from '../models/tarka.js';
+import { chatModel, costMicroUsd, modelInfo } from '../models/tarka.js';
+import { startOfLocalMonth } from '../util/time.js';
 import { sandboxesAvailable } from '../models/sandbox.js';
 import { stripThinking } from '../channels/format.js';
 import { enqueue } from '../jobs/queue.js';
@@ -68,6 +69,19 @@ const HISTORY_CHARS = 16_000;
 export function pickModel(user: User): string {
   const cfg = config();
   return user.model && cfg.models.allowed.includes(user.model) ? user.model : cfg.models.defaultModel;
+}
+
+/**
+ * The model for this turn, keeping the plan's margin: someone who picked a pricier model gets the
+ * default model for the rest of the month once their model spend passes MODEL_BUDGET_USD_PER_MONTH.
+ */
+async function modelWithinBudget(user: User): Promise<{ model: string; overBudget: boolean }> {
+  const cfg = config();
+  const chosen = pickModel(user);
+  if (chosen === cfg.models.defaultModel || cfg.models.budgetMicroUsdPerMonth <= 0) return { model: chosen, overBudget: false };
+  const spent = await usage.costSince(user.id, startOfLocalMonth(user.timezone));
+  if (spent < cfg.models.budgetMicroUsdPerMonth) return { model: chosen, overBudget: false };
+  return { model: cfg.models.defaultModel, overBudget: true };
 }
 
 /** Conversation rows → model messages: merged by role, starting with a user turn, capped in size. */
@@ -177,12 +191,18 @@ export async function runTurn(input: TurnInput): Promise<TurnResult> {
     restricted ? UNVERIFIED_VOICE_TOOLS : undefined,
   );
 
+  const { model: primary, overBudget } = await modelWithinBudget(user);
+  if (overBudget && (await kv.get(`budget-note:${user.id}:${startOfLocalMonth(user.timezone).toISOString().slice(0, 7)}`)) === null) {
+    await kv.set(`budget-note:${user.id}:${startOfLocalMonth(user.timezone).toISOString().slice(0, 7)}`, Date.now());
+    await messages.add(user.id, 'event', input.channel, `This month's allowance for ${modelInfo(pickModel(user)).label} is used up, so replies use ${modelInfo(primary).label} until the 1st.`);
+  }
+
   const instructions = buildInstructions({
     user,
     channel: input.channel,
     now,
     trigger: input.trigger,
-    model: pickModel(user),
+    model: primary,
     profile,
     memories: recalled.text,
     upcoming,
@@ -203,7 +223,6 @@ export async function runTurn(input: TurnInput): Promise<TurnResult> {
 
   // 4. Generate, with one fallback model on provider failure. Only when no tool has run yet:
   //    a retry after a tool ran could repeat what it did (a second reminder, a second request).
-  const primary = pickModel(user);
   const candidates = [primary, ...(cfg.models.fallbackModel && cfg.models.fallbackModel !== primary ? [cfg.models.fallbackModel] : [])];
   let result: Awaited<ReturnType<typeof generateText>> | undefined;
   let usedModel = primary;

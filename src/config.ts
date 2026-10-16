@@ -66,6 +66,11 @@ const schema = z.object({
   TTS_MODEL: z.string().default('kokoro'),
   OCR_MODEL: z.string().default('glm-ocr'),
   MAX_AGENT_STEPS: int(10),
+  // Per-person monthly spend on a non-default model before falling back to the default (0 = no cap).
+  MODEL_BUDGET_USD_PER_MONTH: z
+    .string()
+    .optional()
+    .transform((v) => (v === undefined || v === '' ? 8 : Number.parseFloat(v))),
 
   // Memory (Hindsight)
   HINDSIGHT_URL: z.string().default('http://127.0.0.1:8888'),
@@ -174,6 +179,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env) {
       tts: c.TTS_MODEL,
       ocr: c.OCR_MODEL,
       maxSteps: c.MAX_AGENT_STEPS,
+      budgetMicroUsdPerMonth: Math.round((Number.isFinite(c.MODEL_BUDGET_USD_PER_MONTH) ? c.MODEL_BUDGET_USD_PER_MONTH : 8) * 1e6),
     },
     memory: {
       url: c.HINDSIGHT_URL.replace(/\/+$/, ''),
