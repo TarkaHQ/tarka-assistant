@@ -19,7 +19,7 @@
 
 x-tarka:
   title: Tarka Assistant
-  description: An Instinct-style personal assistant people text (web, Telegram, SMS, WhatsApp, phone) with long-term memory from Hindsight.
+  description: A personal assistant people text (web, Telegram, SMS, WhatsApp, phone) that remembers them, with long-term memory from Hindsight.
   tier: core
   routes:
     - service: app
