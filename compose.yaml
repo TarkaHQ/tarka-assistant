@@ -46,7 +46,7 @@ services:
       HINDSIGHT_API_LLM_PROVIDER: openai
       HINDSIGHT_API_LLM_BASE_URL: ${TARKA_BASE_URL:-https://tarka.rest/v1}
       HINDSIGHT_API_LLM_API_KEY: ${TARKA_API_KEY:-}
-      HINDSIGHT_API_LLM_MODEL: ${MEMORY_MODEL:-qwen3.8-flash-next}
+      HINDSIGHT_API_LLM_MODEL: ${MEMORY_MODEL:-deepseek-v4.1-flash-eu}
       # Tarka's router caps replies at 32,768 tokens; Hindsight asks for 64,000 by default.
       HINDSIGHT_API_RETAIN_MAX_COMPLETION_TOKENS: "16000"
       HINDSIGHT_API_REFLECT_LLM_TIMEOUT: "120"

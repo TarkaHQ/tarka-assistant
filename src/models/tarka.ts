@@ -54,9 +54,21 @@ const KNOWN: Record<string, Omit<ModelInfo, 'id'>> = {
     tier: 'standard',
     price: { in: 0.33, cached: 0.0066, out: 1.32 },
   },
+  'deepseek-v4.1-flash-eu': {
+    label: 'DeepSeek V4.1 Flash (EU)',
+    blurb: 'Quick, and dependable with tools. Low cost. Served in Europe.',
+    tier: 'standard',
+    price: { in: 0.33, cached: 0.0066, out: 1.32 },
+  },
   'glm-5.3-flash': {
     label: 'GLM 5.3 Flash',
     blurb: 'The cheapest option, and dependable for everyday tasks.',
+    tier: 'standard',
+    price: { in: 0.1485, cached: 0.0297, out: 0.495 },
+  },
+  'glm-5.3-flash-eu': {
+    label: 'GLM 5.3 Flash (EU)',
+    blurb: 'The cheapest option, and dependable for everyday tasks. Served in Europe.',
     tier: 'standard',
     price: { in: 0.1485, cached: 0.0297, out: 0.495 },
   },

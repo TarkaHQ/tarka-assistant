@@ -91,9 +91,15 @@ x-tarka:
       secret: true
     - name: STRIPE_PRICE_ID
       label: Stripe price id for the monthly plan
+    - name: ALLOWED_MODELS
+      label: Models offered in the picker (comma-separated Tarka aliases)
+      description: The first one people see is the host's default model. Kimi K3 is left out until the router's empty-reply fixes land.
+      default_value: deepseek-v4.1-flash-eu,glm-5.3-flash-eu
   runtime_profile:
     managed_model: true
-    default_model_alias: qwen3.8-flash-next
+    # DeepSeek V4.1 Flash (EU): 24/24 in the October 2026 evals at 2.5 s a scenario. Qwen 3.8 is
+    # retired (and answered at about 4 tokens a second), so it is no longer the default anywhere here.
+    default_model_alias: deepseek-v4.1-flash-eu
     utility_modalities: [stt, ocr, tts]
     platform_services: [app]
   volume_sizes:
@@ -113,6 +119,7 @@ services:
       HINDSIGHT_URL: http://hindsight:8888
       HINDSIGHT_API_KEY: ${HINDSIGHT_API_KEY}
       TARKA_BASE_URL: http://tarka/v1
+      ALLOWED_MODELS: ${ALLOWED_MODELS}
       SIGNUP_MODE: ${SIGNUP_MODE}
       TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN}
       TELEGRAM_WEBHOOK_SECRET: ${TELEGRAM_WEBHOOK_SECRET}
@@ -180,7 +187,9 @@ services:
       HINDSIGHT_API_LLM_PROVIDER: openai
       HINDSIGHT_API_LLM_BASE_URL: http://tarka/v1
       HINDSIGHT_API_LLM_API_KEY: tarka-local
-      HINDSIGHT_API_LLM_MODEL: qwen3.8-flash-next
+      # Fact extraction and reflection. The 25 Oct 2026 bake-off (102 LongMemEval-S questions) ran
+      # Hindsight on this model: 87.3% against 83.3% for the whole history in the prompt.
+      HINDSIGHT_API_LLM_MODEL: deepseek-v4.1-flash-eu
       HINDSIGHT_API_RETAIN_MAX_COMPLETION_TOKENS: "16000"
       HINDSIGHT_API_REFLECT_LLM_TIMEOUT: "120"
       HINDSIGHT_API_EMBEDDINGS_PROVIDER: local
