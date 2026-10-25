@@ -50,6 +50,14 @@ x-tarka:
       description: Any value. Inside the host the gateway adds the identity; Hindsight only insists that a key is set, and the platform insists that anything named like a key comes from a secret variable.
       secret: true
       default_value: tarka-local
+    - name: ASSISTANT_NAME
+      label: What the assistant calls itself
+      description: The name it introduces itself with and answers to.
+      default_value: Tarka
+    - name: PRODUCT_NAME
+      label: Product name
+      description: Shown on the web pages, in sign-in emails and in the invite-only message.
+      default_value: Tarka Assistant
     - name: SIGNUP_MODE
       label: Sign-ups (open, invite or closed)
       default_value: invite
@@ -129,6 +137,8 @@ services:
       HINDSIGHT_API_KEY: ${HINDSIGHT_API_KEY}
       TARKA_BASE_URL: http://tarka/v1
       ALLOWED_MODELS: ${ALLOWED_MODELS}
+      ASSISTANT_NAME: ${ASSISTANT_NAME}
+      PRODUCT_NAME: ${PRODUCT_NAME}
       SIGNUP_MODE: ${SIGNUP_MODE}
       TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN}
       TELEGRAM_WEBHOOK_SECRET: ${TELEGRAM_WEBHOOK_SECRET}
