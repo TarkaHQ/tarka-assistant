@@ -45,6 +45,11 @@ x-tarka:
       description: 32+ random characters. Only the app may read or write memories.
       secret: true
       required: true
+    - name: TARKA_LOCAL_KEY
+      label: Placeholder model key for Hindsight
+      description: Any value. Inside the host the gateway adds the identity; Hindsight only insists that a key is set, and the platform insists that anything named like a key comes from a secret variable.
+      secret: true
+      default_value: tarka-local
     - name: SIGNUP_MODE
       label: Sign-ups (open, invite or closed)
       default_value: invite
@@ -100,6 +105,10 @@ x-tarka:
     # DeepSeek V4.1 Flash (EU): 24/24 in the October 2026 evals at 2.5 s a scenario. Qwen 3.8 is
     # retired (and answered at about 4 tokens a second), so it is no longer the default anywhere here.
     default_model_alias: deepseek-v4.1-flash-eu
+    # The gateway's per-request context ceiling and the point at which it compacts, as the
+    # managed templates set them. The assistant keeps its own prompts well under this.
+    context_token_limit: 81920
+    compaction_threshold_tokens: 65536
     utility_modalities: [stt, ocr, tts]
     platform_services: [app]
   volume_sizes:
@@ -186,7 +195,7 @@ services:
       HINDSIGHT_API_TENANT_API_KEY: ${HINDSIGHT_API_KEY}
       HINDSIGHT_API_LLM_PROVIDER: openai
       HINDSIGHT_API_LLM_BASE_URL: http://tarka/v1
-      HINDSIGHT_API_LLM_API_KEY: tarka-local
+      HINDSIGHT_API_LLM_API_KEY: ${TARKA_LOCAL_KEY}
       # Fact extraction and reflection. The 25 Oct 2026 bake-off (102 LongMemEval-S questions) ran
       # Hindsight on this model: 87.3% against 83.3% for the whole history in the prompt.
       HINDSIGHT_API_LLM_MODEL: deepseek-v4.1-flash-eu
