@@ -1,22 +1,36 @@
 # Tarka Assistant
 
-A personal assistant people text. It remembers them, reminds them, works through their calendar and email, and phones businesses for them. It asks before it sends, invites, deletes or calls anything. It runs on Tarka: open models from Tarka's router, long-term memory from [Hindsight](https://github.com/vectorize-io/hindsight), and Tarka sandboxes for exact calculations.
+**A personal assistant you text.** It remembers what you tell it, reminds you, keeps an eye on your calendar and email, answers questions, and will even phone a restaurant to book a table and tell you what they said. Nothing goes out — no email, no booking, no deletion, no call — until you say yes.
 
-It is built as the example a non-technical person can try in a minute (sign up, start texting, look under the hood) and as an open template a developer can deploy for their own users on a Tarka agent host.
+Tarka runs it as **Tarkendra** (invite-only for now). It is also open source under the MIT licence, so a developer can run their own copy for their own users, on a Tarka agent host or anywhere Docker runs.
 
-## What it does
+## What it's like to use
 
-| | |
-|---|---|
-| **Reach it anywhere** | Web chat, Telegram (one shared bot), SMS and WhatsApp through Telnyx, and phone calls through Telnyx AI Assistants. One continuous conversation across all of them. |
-| **Remembers** | One Hindsight memory bank per person. Every exchange is retained; relevant memories are recalled before each reply; a profile ("About you") is kept up to date. People can see and delete what it remembers. |
-| **Reminds and follows up** | Reminders (one-off or repeating), scheduled tasks it runs itself ("every Monday at 8, send me my week"), a morning brief, check-ins, and meeting heads-ups. Quiet hours and a daily cap. |
-| **Works through your accounts** | Google Calendar (list, free slots, create, move, delete), Gmail (search, read, draft, send), Drive (search, read Docs/Sheets/Slides) and Contacts. |
-| **Acts in the world** | Web search and reading, weather, lists, exact calculations in a Tarka sandbox, and concierge phone calls to businesses with a report back. |
-| **Asks first** | Anything that sends, invites, deletes or calls, and any repeating task, is held as an approval. The person sees a summary written by code (not the model) and only a plain YES, a button, or "yes CODE" executes it. The model can't approve its own actions. |
-| **Shows its work** | Each reply records model, tokens, cost, memory recall and tools. The "Under the hood" page shows this and lets people switch models. |
+- **Reach it where you already are.** The web, Telegram, SMS, WhatsApp, or a phone call. It's one conversation however you reach it: tell it something by text and it knows when you call.
+- **Tell it things once.** "My sister's called Anya and she's allergic to peanuts." Months later it still knows. You can see everything it remembers and delete any of it.
+- **Let it run your day.** A morning brief at 7:30, reminders ("remind me to call mum tomorrow at six"), repeating jobs ("every Monday at 8, send me my week"), a heads-up before meetings, and quiet hours so it never texts you at 3 am.
+- **Connect Google.** It reads your calendar and mail, finds free slots, drafts replies, moves meetings, and looks things up in Drive.
+- **Ask it to do things.** Look something up on the web, check the weather, keep a list, work out a sum exactly, or phone a business and report back.
+- **Nothing goes out without you.** Sending an email, inviting someone, deleting something, placing a call or setting up a repeating job all wait for your yes. What you approve is shown to you as the software will do it, written by code rather than by the model, so it can't talk its way past you.
+- **See what it costs.** An "Under the hood" page shows the model behind each reply, the tokens, the price and what it recalled. You can switch models.
 
-## How a message flows
+## Privacy and safety, in plain words
+
+- Your memories live in a memory bank that is yours alone. "Forget everything" empties it; deleting your account removes everything.
+- The assistant never sees your sign-in links or your voice PIN. Code handles those.
+- Someone who phones claiming to be you gets your assistant only if their carrier vouches for the number or they say your PIN. Otherwise they get a stranger-safe version that knows nothing about you and keeps nothing.
+- Web pages and emails it reads are treated as untrusted. Instructions hidden in them can't send, delete, call or schedule anything, because those actions wait for your yes.
+- Card numbers, one-time codes and passwords are removed before anything is remembered.
+
+---
+
+## For developers
+
+The rest of this page is about running it yourself.
+
+### What's in the box
+
+One TypeScript service (web and worker, in one process or two), Postgres with pgvector, and [Hindsight](https://github.com/vectorize-io/hindsight) for long-term memory. Models, speech-to-text, OCR, text-to-speech and code sandboxes all come from Tarka. Many people share one deployment; their data is separated by user in Postgres and by memory bank in Hindsight.
 
 ```
  Telegram / SMS / WhatsApp / web / phone
@@ -40,9 +54,7 @@ It is built as the example a non-technical person can try in a minute (sign up, 
  worker: scheduler (reminders, tasks, brief, check-ins) · meeting nudges · call reports
 ```
 
-Everything is one TypeScript service (`ROLE=all`, or `web` and `worker` separately) plus Postgres (pgvector) and Hindsight. Users share the service; their data is separated by user id in Postgres and by memory bank in Hindsight.
-
-## Run it locally
+### Run it locally
 
 You need Docker and a Tarka API key (`tk_live_…`, from the Tarka console).
 
@@ -60,64 +72,43 @@ npm run dev            # web + worker
 npm run chat           # talk to it in the terminal as a local test user (/brief, /checkin, /reset)
 npm test               # unit + integration tests (needs Postgres on :5433, see vitest.config.ts)
 npm run typecheck
-npm run eval           # scenario evals against real Tarka models (needs TARKA_API_KEY; see scripts/evals.ts)
+npm run eval           # scenario evals against real Tarka models (see docs/evals.md)
 ```
 
-## How it does on Tarka's models
+### Deploy on a Tarka agent host
 
-`npm run eval` runs 13 scenarios through the real pipeline: sign-up, reminders, lists, calendar, email with approval, an injected instruction in an email, a repeating task, the morning brief, a quiet check-in and an unverified caller. Messages go to the real models; Google and the chat channels are faked.
+`deploy/tarka.compose.yaml` runs the whole thing — app, Postgres, Hindsight — as one custom Compose stack on a core-tier host. Inside the host no service needs a model key; the host's gateway adds the identity. Steps, variables and operating notes are in [docs/deploy-on-tarka.md](docs/deploy-on-tarka.md). The image is built by `.github/workflows/ci.yml` and published to `ghcr.io/tarkahq/tarka-assistant`. `compose.yaml` runs it anywhere with Docker.
 
-Each scenario ran twice per model, on 16 October 2026:
+### Channels and integrations
 
-| Model | Passed | Average time per scenario | Cost of the run |
-|---|---:|---:|---:|
-| qwen3.8-flash-next | 23/24 | 37.4 s | $0 (no charge today) |
-| deepseek-v4.1-flash | 24/24 | 2.5 s | $0.032 |
-| glm-5.3-flash | 24/24 | 4.5 s | $0.025 |
-| kimi-k3 | 21/24 | 6.4 s | $0.31 |
+Setup for Telegram, SMS, WhatsApp, phone calls, Google, email sign-in, web search and billing is in [docs/channels.md](docs/channels.md). Two things take days, so start them first: **US SMS** needs 10DLC or toll-free verification before carriers deliver texts, and **Google** verification for Gmail and Drive scopes needs a security assessment (until then, up to 100 test users can be added to the OAuth consent screen).
 
-- **Qwen:** its one miss was a check-in that hit the 150-second limit. Qwen generated about 28 tokens a second in these runs.
-- **Kimi K3:** results varied between runs; another run the same day passed 24/24.
-  - It often ends with an empty reply or a lost tool call. `src/agent/turn.ts` asks again (twice at most, text only once something has changed), and that recovers most of them.
-  - The misses were an empty reply after two retries, a reply that was raw JSON, and a greeting the check didn't recognise.
-- **Before the fixes found by the first run,** the same scenarios passed 18, 20, 19 and 13 times out of 24. The first run turned up:
-  - a calendar bug: "tomorrow" was read as 9 AM to 9 AM;
-  - Kimi's empty and garbled replies;
-  - models asking "shall I send it?" before calling a tool that already asks.
+Since 15 January 2026 Meta bars general-purpose AI assistants from the WhatsApp Business Platform; EU interim measures restored access in the EEA in June 2026, so the assistant only accepts WhatsApp users with EEA numbers (`WHATSAPP_ALLOWED_COUNTRIES`).
 
-## Deploy
+### How it does on Tarka's models
 
-* **Tarka agent host:** `deploy/tarka.compose.yaml` — see [docs/deploy-on-tarka.md](docs/deploy-on-tarka.md).
-* **Anywhere with Docker:** `compose.yaml`.
-* The image is built by `.github/workflows/ci.yml` and published to `ghcr.io/<owner>/tarka-assistant`.
+13 scenarios, each run twice per model, on 16 October 2026 (details and the memory bake-off in [docs/evals.md](docs/evals.md)):
 
-## Channels and integrations
+| Model | Passed | Average time per scenario |
+|---|---:|---:|
+| deepseek-v4.1-flash | 24/24 | 2.5 s |
+| glm-5.3-flash | 24/24 | 4.5 s |
+| kimi-k3 | 21/24 | 6.4 s |
 
-Setup steps for Telegram, SMS, WhatsApp, phone calls, Google, email sign-in, search and billing are in [docs/channels.md](docs/channels.md). Two things take days, so start them first:
+### Safety model
 
-* **US SMS** needs 10DLC or toll-free verification before carriers deliver texts.
-* **Google** verification for Gmail and Drive scopes (restricted scopes need a security assessment). Until then, up to 100 test users can be added to the OAuth consent screen.
+- **Approval gate.** Tools declare when they need approval (`approval()` in `src/agent/tools/*`): sending email, invitations, deletions, calls, and repeating tasks. A held action runs only on a deterministic decision in `src/agent/approvals.ts`, never on the model's say-so. The whole reply must be a yes or a no ("yes", "ok send it", "👍"); "yes, but…" or "yes I'm free Tuesday" is conversation. A bare yes counts only for the request in the assistant's newest message, sent after it, and only for things the person asked for; anything older, or raised by a scheduled task or the brief, needs its code ("yes K7PD"), a button, or the dashboard. The person sees the request as written by code (recipients, full email text, exact times, schedule); relative times are fixed when the request is made; requests never replace each other silently; scheduled tasks, the brief and check-ins can't create, change or cancel schedules without approval.
+- **Untrusted content.** Web pages, emails and documents are marked as data in tool results and in the instructions.
+- **Outbound fetches** from `web_read` only reach public addresses: private, loopback, link-local, metadata and IPv4-in-IPv6 forms are refused, the socket is pinned to the checked addresses (no DNS rebinding), and every redirect is checked again. The Hindsight API needs a key (`HINDSIGHT_API_KEY`).
+- **Secrets.** OAuth tokens are encrypted with AES-256-GCM keyed from `APP_SECRET`; card numbers, one-time codes and passwords are redacted before anything reaches memory.
+- **Webhooks** are verified: Telnyx (Ed25519), Telegram (secret token, derived from `APP_SECRET` when not set), Stripe (signature). Redelivered webhooks are queued once.
+- **Sign-in links** are sent by code (the model never sees them) and open a confirmation page that names the account by its email, phone or chat, never its editable name; only its button uses the link (link previews can't), and it only continues to this site's own pages. Connecting Google needs a 6-digit code sent to the account's own chat, phone or email, typed in the same browser, and the OAuth callback only completes for that browser session. A channel address (a Telegram chat, a number) is never moved from one account to another.
+- **Phone calls.** Caller ID can be faked, so a call gets the person's memory, schedule and tools only when the carrier vouches for the number (STIR/SHAKEN "A") or they say their voice PIN (6–8 digits, checked in code, never seen by the model; 3 tries per call, 5 wrong PINs a day, 10 a week; every wrong PIN is texted to the account holder; counted under a database lock). Otherwise a restricted assistant answers general questions and stores nothing. Calls never get email or Drive tools and can't approve anything: approvals are texted.
+- **Limits.** Reminders repeat at most every 15 minutes, tasks at most hourly; per person, 60 scheduled items, 24 task runs and 48 reminder texts a day (`MAX_SCHEDULED_ITEMS`, `MAX_TASK_RUNS_PER_DAY`, `MAX_REMINDERS_PER_DAY`). Someone who picks a pricier model goes back to the default model for the rest of the month after a set spend (`MODEL_BUDGET_USD_PER_MONTH`, $8 by default).
+- **Retries.** A message interrupted by a restart is retried once; if it was already answered it isn't answered again, and an aborted turn stops instead of apologising.
+- **Deletion.** "Forget everything" deletes the memory bank; deleting the account cancels the subscription, then removes all rows (cascade) and the bank.
 
-WhatsApp: since 15 January 2026 Meta bars general-purpose AI assistants from the WhatsApp Business Platform. EU interim measures restored access in the EEA (June 2026), so the assistant only accepts WhatsApp users with EEA numbers (`WHATSAPP_ALLOWED_COUNTRIES`).
-
-## Safety model
-
-* **Approval gate:** tools declare when they need approval (`approval()` in `src/agent/tools/*`): sending email, invitations, deletions, calls, and repeating tasks. A held action runs only on a deterministic decision (`src/agent/approvals.ts`), never on the model's say-so:
-  * the whole reply must be a yes or a no ("yes", "ok send it", "👍"); "yes, but…", "yes I'm free Tuesday" or "yes?" are conversation;
-  * a bare yes counts only for the request(s) in the assistant's newest message, only if it was sent after that message, and only for things the person asked for; anything older, or raised by a scheduled task or the brief, needs its code ("yes K7PD"), a button, or the dashboard;
-  * under the model's reply, the person sees the request as written by code (recipients, full email text, exact times, schedule), so a model that misdescribes an action can't get it approved. Relative times ("tomorrow 1pm") are fixed when the request is made, so a later yes does exactly what was shown;
-  * requests never replace each other silently; scheduled tasks, the brief and check-ins can't create, change or cancel schedules without approval.
-* **Untrusted content:** web pages, emails and documents are marked as data in tool results and in the instructions.
-* **Outbound fetches** from `web_read` only reach public addresses: private, loopback, link-local, metadata and IPv4-in-IPv6 forms are refused, the socket is pinned to the checked addresses (no DNS rebinding), and every redirect is checked again. The Hindsight API needs a key (`HINDSIGHT_API_KEY`).
-* **Secrets:** OAuth tokens are encrypted with AES-256-GCM keyed from `APP_SECRET`; card numbers, one-time codes and passwords are redacted before anything reaches memory.
-* **Webhooks** are verified: Telnyx (Ed25519), Telegram (secret token, derived from `APP_SECRET` when not set), Stripe (signature). Redelivered webhooks are queued once.
-* **Sign-in links** are sent to the person by code (the model never sees them) and open a confirmation page that names the account by its email, phone or chat, never its editable name; only its button uses the link (link previews can't), and it only continues to this site's own pages. **Connecting Google** needs a 6-digit code sent to the account's own chat, phone or email, typed in the same browser, and the OAuth callback only completes for that browser session, so a forwarded link can't attach one person's Google account to another person's assistant. A channel address (a Telegram chat, a number) is never moved from one account to another.
-* **Phone calls:** caller ID can be faked, so a call gets the person's memory, schedule and tools only when their carrier vouches for the number (STIR/SHAKEN "A") or they say their voice PIN (6–8 digits, checked in code, never seen by the model; 3 tries per call, 5 wrong PINs a day, 10 a week before it needs resetting; every wrong PIN is texted to the account holder; counted under a database lock so parallel calls get no extra tries). Otherwise a restricted assistant answers general questions and stores nothing (it doesn't even know the account holder's city or timezone). Calls never get email or Drive tools and can't approve anything: approvals are texted.
-* **Limits:** reminders repeat at most every 15 minutes, tasks at most hourly; per person, 60 scheduled items, 24 task runs and 48 reminder texts a day (`MAX_SCHEDULED_ITEMS`, `MAX_TASK_RUNS_PER_DAY`, `MAX_REMINDERS_PER_DAY`). Someone who picks a pricier model in "Under the hood" goes back to the default model for the rest of the month after $8 of model spend (`MODEL_BUDGET_USD_PER_MONTH`), so the $20 plan keeps its margin.
-* **Retries:** a message interrupted by a restart is retried once; if it was already answered it isn't answered again, and an aborted turn stops instead of apologising.
-* **Deletion:** "Forget everything" deletes the memory bank; deleting the account cancels the subscription, then removes all rows (cascade) and the bank.
-
-## Layout
+### Layout
 
 ```
 src/agent/          turn runner, prompt, approvals, tools (memory, schedule, lists, web, weather,
@@ -131,12 +122,17 @@ src/web/            dashboard (Hono JSX), JSON API, sessions
 src/models/         Tarka chat, speech, OCR and sandbox clients
 migrations/         Postgres schema
 deploy/             Tarka agent host compose
-scripts/            Telnyx setup
+docs/               channels, deploy, evals
+scripts/            Telnyx setup, evals
 ```
 
-## Known limits
+### Known limits
 
-* Prompt injection: a web page or email can still try to steer the model within a turn (for example, to put private details into a `web_read` URL). Sending, inviting, deleting, calling and repeating tasks are gated, but reading the web isn't.
-* Reply streaming on the phone is sentence-chunked after generation, not token streaming.
-* The memory model calls (fact extraction, profile refresh) are billed to the deployment, not shown per user yet.
-* One shared process handles all users; the per-user isolated-instance design for privacy-sensitive customers is in Tarka's roadmap notes (`isolated-user-agents`).
+- A web page or email can still try to steer the model within a turn (for example, to put private details into a `web_read` URL). The actions that matter are gated; reading the web isn't.
+- Reply streaming on the phone is sentence-chunked after generation, not token streaming.
+- The memory model calls (fact extraction, profile refresh) are billed to the deployment, not shown per user yet.
+- One shared process handles all users. A one-instance-per-user layout for privacy-sensitive deployments is planned but not built.
+
+## Licence
+
+MIT. See [LICENSE](LICENSE).
