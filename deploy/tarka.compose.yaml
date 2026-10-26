@@ -47,20 +47,20 @@ x-tarka:
       required: true
     - name: TARKA_LOCAL_KEY
       label: Placeholder model key for Hindsight
-      description: Any value. Inside the host the gateway adds the identity; Hindsight only insists that a key is set, and the platform insists that anything named like a key comes from a secret variable.
+      description: Any value, e.g. tarka-local. Inside the host the gateway adds the identity; Hindsight only insists that a key is set, and the platform insists that anything named like a key comes from a secret variable (which may not carry a default).
       secret: true
-      default_value: tarka-local
+      required: true
     - name: ASSISTANT_NAME
       label: What the assistant calls itself
       description: The name it introduces itself with and answers to.
-      default_value: Tarka
+      default: Tarka
     - name: PRODUCT_NAME
       label: Product name
       description: Shown on the web pages, in sign-in emails and in the invite-only message.
-      default_value: Tarka Assistant
+      default: Tarka Assistant
     - name: SIGNUP_MODE
       label: Sign-ups (open, invite or closed)
-      default_value: invite
+      default: invite
     - name: TELEGRAM_BOT_TOKEN
       label: Telegram bot token
       secret: true
@@ -99,7 +99,7 @@ x-tarka:
     - name: EMAIL_FROM
       label: Sender for sign-in emails
       description: Must be a sender verified in Brevo, e.g. "Tarkendra <noreply@t.tarkahq.com>".
-      default_value: Tarka Assistant <assistant@tarkahq.com>
+      default: Tarka Assistant <assistant@tarkahq.com>
     - name: STRIPE_SECRET_KEY
       label: Stripe secret key
       secret: true
@@ -111,7 +111,7 @@ x-tarka:
     - name: ALLOWED_MODELS
       label: Models offered in the picker (comma-separated Tarka aliases)
       description: The first one people see is the host's default model. Kimi K3 is left out until the router's empty-reply fixes land.
-      default_value: deepseek-v4.1-flash-eu,glm-5.3-flash-eu
+      default: deepseek-v4.1-flash-eu,glm-5.3-flash-eu
   runtime_profile:
     managed_model: true
     # DeepSeek V4.1 Flash (EU): 24/24 in the October 2026 evals at 2.5 s a scenario. Qwen 3.8 is
@@ -136,7 +136,11 @@ services:
       PORT: "8080"
       PUBLIC_URL: ${PUBLIC_URL}
       APP_SECRET: ${APP_SECRET}
-      DATABASE_URL: postgres://assistant:${POSTGRES_PASSWORD}@db:5432/assistant
+      # The password is not embedded in the URL: a secret inside a larger value is stored by the
+      # platform under a derived name its own admission policy rejects (Oct 2026). Both the app
+      # (postgres.js, pg) and Hindsight (asyncpg) read PGPASSWORD when the URL carries none.
+      DATABASE_URL: postgres://assistant@db:5432/assistant
+      PGPASSWORD: ${POSTGRES_PASSWORD}
       HINDSIGHT_URL: http://hindsight:8888
       HINDSIGHT_API_KEY: ${HINDSIGHT_API_KEY}
       TARKA_BASE_URL: http://tarka/v1
@@ -202,7 +206,8 @@ services:
     image: ghcr.io/vectorize-io/hindsight-api:1.0.0
     environment:
       # Same database as the app, in its own schema.
-      HINDSIGHT_API_DATABASE_URL: postgresql://assistant:${POSTGRES_PASSWORD}@db:5432/assistant
+      HINDSIGHT_API_DATABASE_URL: postgresql://assistant@db:5432/assistant
+      PGPASSWORD: ${POSTGRES_PASSWORD}
       HINDSIGHT_API_DATABASE_SCHEMA: hindsight
       # Every API call needs the key (the health check doesn't), so nothing else in the stack,
       # nor a page the assistant is tricked into fetching, can read the memory banks.
