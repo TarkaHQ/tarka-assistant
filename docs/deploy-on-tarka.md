@@ -32,6 +32,18 @@ Totals: 3.55 vCPU and about 5.5 GiB of limits, inside the core tier.
 5. **Add channels** with the variables in [channels.md](channels.md). Telegram registers its webhook on start; Telnyx and Stripe webhooks are configured on their side to point at `PUBLIC_URL/webhooks/…`.
 6. **Check it:** `PUBLIC_URL/healthz` returns `{"ok":true,"memory":true,…}` once Hindsight has downloaded its models (first start takes a few minutes).
 
+## Rules the platform enforces (learned the hard way, October 2026)
+
+A host whose compose breaks one of these shows `status_detail.error: reconcile_failed` and nothing more; the reason is only in the controller's log. The ones this file had to learn:
+
+* **A secret may not be embedded in a larger value.** `postgres://user:${PASSWORD}@db/app` is parsed fine, but the platform stores the expanded value under a derived name (`TARKA_DERIVED_<hex>`) that its own admission policy rejects, so the host never comes up. Pass the secret on its own: this stack sends the database password as `PGPASSWORD`, which `postgres.js`, `pg` and Hindsight's `asyncpg` all read when the URL carries no password.
+* **Anything named like a key must come from a secret variable**, even a placeholder: `HINDSIGHT_API_LLM_API_KEY: tarka-local` is refused; `${TARKA_LOCAL_KEY}` with a secret variable is accepted.
+* **A secret variable cannot carry a default**, so `TARKA_LOCAL_KEY` is required and you type any value.
+* **Variable defaults use the key `default`**, not `default_value`.
+* **The runtime profile needs `context_token_limit` and `compaction_threshold_tokens`.**
+* **Changing volumes needs a paused host:** the API answers `pause_agent_host_before_resizing` otherwise.
+* **Optional secret variables are set to an empty string** on the hosted instance rather than left out; whether an unset one is tolerated has not been tested.
+
 ## Operating notes
 
 * **Limits:** `MAX_SCHEDULED_ITEMS` (60) and `MAX_TASK_RUNS_PER_DAY` (24) per person; `PROACTIVE_ENABLED=false` stops every agent-initiated turn (briefs, check-ins, tasks) while reminders still fire.
